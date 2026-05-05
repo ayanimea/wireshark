@@ -73,7 +73,6 @@ jobs:
             gnutls-devel \
             brotli-devel \
             libzstd-devel \
-            nghttp2-devel \
             opus-devel \
             qt5-qtbase-devel \
             qt5-qtmultimedia-devel \
@@ -145,13 +144,12 @@ jobs:
               # Install EPEL and SCL
               yum install -y epel-release centos-release-scl
 
-              # Fix SCL repos to use vault over HTTPS (centos-release-scl
-              # creates new repo files that still point to mirrorlist.centos.org)
-              for f in /etc/yum.repos.d/CentOS-SCLo-*.repo; do
-                [ -f "$f" ] || continue
-                sed -i "s/mirrorlist=/#mirrorlist=/g" "$f"
-                sed -i "s|#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" "$f"
-              done
+              # Unconditionally rewrite SCL repo files with known-good vault HTTPS
+              # URLs. The centos-release-scl package pulled from vault already
+              # has baseurl=http://vault.centos.org (not mirror.centos.org), so
+              # sed patterns targeting mirror.centos.org never matched.
+              printf '[centos-sclo-sclo]\nname=CentOS-7 - SCLo sclo\nbaseurl=https://vault.centos.org/centos/7/sclo/$basearch/sclo/\ngpgcheck=1\nenabled=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo\n' > /etc/yum.repos.d/CentOS-SCLo-scl.repo
+              printf '[centos-sclo-rh]\nname=CentOS-7 - SCLo rh\nbaseurl=https://vault.centos.org/centos/7/sclo/$basearch/rh/\ngpgcheck=1\nenabled=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo\n' > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
 
               # Install build dependencies.
               # devtoolset-9: GCC 9 with full C++17 support (system GCC 4.8.5 lacks C++17)
@@ -241,13 +239,11 @@ jobs:
               # Install SCL for devtoolset-7 (maximum available for EL6, provides GCC 7 with C++17)
               yum install -y centos-release-scl
 
-              # Fix SCL repos to use vault over HTTPS (centos-release-scl
-              # creates new repo files that still point to mirrorlist.centos.org)
-              for f in /etc/yum.repos.d/CentOS-SCLo-*.repo; do
-                [ -f "$f" ] || continue
-                sed -i "s/mirrorlist=/#mirrorlist=/g" "$f"
-                sed -i "s|#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" "$f"
-              done
+              # Unconditionally rewrite SCL repo files with known-good vault HTTPS
+              # URLs (same root cause as EL7: vault-installed centos-release-scl
+              # already has baseurl=http://vault.centos.org, not mirror.centos.org).
+              printf '[centos-sclo-sclo]\nname=CentOS-6 - SCLo sclo\nbaseurl=https://vault.centos.org/centos/6/sclo/$basearch/sclo/\ngpgcheck=1\nenabled=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo\n' > /etc/yum.repos.d/CentOS-SCLo-scl.repo
+              printf '[centos-sclo-rh]\nname=CentOS-6 - SCLo rh\nbaseurl=https://vault.centos.org/centos/6/sclo/$basearch/rh/\ngpgcheck=1\nenabled=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo\n' > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
 
               # Install build dependencies.
               # NOTE: EL6 ships glib2 2.28 (< required 2.54) and cmake3 3.6.x

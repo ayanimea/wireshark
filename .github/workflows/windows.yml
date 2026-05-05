@@ -1,6 +1,6 @@
 name: Build Windows
 
-on: [push]
+on: workflow_dispatch
 
 jobs:
   windows:

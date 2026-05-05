@@ -1,6 +1,6 @@
 name: Build MSYS2
 
-on: [push]
+on: workflow_dispatch
 
 jobs:
   msys2-ucrt64:
