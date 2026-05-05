@@ -85,6 +85,9 @@ jobs:
       - name: Set release version
         run: python3 tools/make-version.py --set-release .
 
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory '*'
+
       - name: Configure build
         run: |
           cmake -S . -B build -GNinja \
@@ -145,11 +148,13 @@ jobs:
               yum install -y epel-release centos-release-scl
 
               # Unconditionally rewrite SCL repo files with known-good vault HTTPS
-              # URLs. The centos-release-scl package pulled from vault already
-              # has baseurl=http://vault.centos.org (not mirror.centos.org), so
-              # sed patterns targeting mirror.centos.org never matched.
-              printf '[centos-sclo-sclo]\nname=CentOS-7 - SCLo sclo\nbaseurl=https://vault.centos.org/centos/7/sclo/$basearch/sclo/\ngpgcheck=1\nenabled=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo\n' > /etc/yum.repos.d/CentOS-SCLo-scl.repo
-              printf '[centos-sclo-rh]\nname=CentOS-7 - SCLo rh\nbaseurl=https://vault.centos.org/centos/7/sclo/$basearch/rh/\ngpgcheck=1\nenabled=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo\n' > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
+              # URLs.  printf with single-quoted args cannot be used here because
+              # this entire script is already inside a single-quoted bash -exc '...'
+              # block; inner single quotes would terminate the outer string.
+              # Double-quoted echo args are safe and \$basearch prevents bash from
+              # expanding the RPM variable (which yum resolves at runtime).
+              { echo "[centos-sclo-sclo]"; echo "name=CentOS-7 - SCLo sclo"; echo "baseurl=https://vault.centos.org/centos/7/sclo/\$basearch/sclo/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl.repo
+              { echo "[centos-sclo-rh]"; echo "name=CentOS-7 - SCLo rh"; echo "baseurl=https://vault.centos.org/centos/7/sclo/\$basearch/rh/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
 
               # Install build dependencies.
               # devtoolset-9: GCC 9 with full C++17 support (system GCC 4.8.5 lacks C++17)
@@ -176,6 +181,7 @@ jobs:
 
               source /opt/rh/devtoolset-9/enable
 
+              git config --global --add safe.directory /workspace
               cmake3 -S . -B build -GNinja \
                 -DBUILD_wireshark=ON \
                 -DUSE_qt6=OFF \
@@ -240,10 +246,10 @@ jobs:
               yum install -y centos-release-scl
 
               # Unconditionally rewrite SCL repo files with known-good vault HTTPS
-              # URLs (same root cause as EL7: vault-installed centos-release-scl
-              # already has baseurl=http://vault.centos.org, not mirror.centos.org).
-              printf '[centos-sclo-sclo]\nname=CentOS-6 - SCLo sclo\nbaseurl=https://vault.centos.org/centos/6/sclo/$basearch/sclo/\ngpgcheck=1\nenabled=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo\n' > /etc/yum.repos.d/CentOS-SCLo-scl.repo
-              printf '[centos-sclo-rh]\nname=CentOS-6 - SCLo rh\nbaseurl=https://vault.centos.org/centos/6/sclo/$basearch/rh/\ngpgcheck=1\nenabled=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo\n' > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
+              # URLs (same root cause as EL7: inner single quotes cannot be used
+              # inside this single-quoted bash -exc '...' block).
+              { echo "[centos-sclo-sclo]"; echo "name=CentOS-6 - SCLo sclo"; echo "baseurl=https://vault.centos.org/centos/6/sclo/\$basearch/sclo/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl.repo
+              { echo "[centos-sclo-rh]"; echo "name=CentOS-6 - SCLo rh"; echo "baseurl=https://vault.centos.org/centos/6/sclo/\$basearch/rh/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
 
               # Install build dependencies.
               # NOTE: EL6 ships glib2 2.28 (< required 2.54) and cmake3 3.6.x
@@ -274,6 +280,7 @@ jobs:
 
               source /opt/rh/devtoolset-7/enable
 
+              git config --global --add safe.directory /workspace
               cmake3 -S . -B build \
                 -DBUILD_wireshark=OFF \
                 -DENABLE_WERROR=OFF
