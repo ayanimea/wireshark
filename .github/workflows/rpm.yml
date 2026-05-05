@@ -160,6 +160,7 @@ jobs:
               # devtoolset-9: GCC 9 with full C++17 support (system GCC 4.8.5 lacks C++17)
               # cmake3: cmake >= 3.17 from EPEL (system cmake 2.8 is too old)
               yum install -y \
+                git \
                 devtoolset-9-gcc devtoolset-9-gcc-c++ devtoolset-9-binutils \
                 cmake3 cmake3-rpm-macros \
                 flex ninja-build python3 \
@@ -256,6 +257,7 @@ jobs:
               # (< required 3.13). These are known blockers; the steps below
               # document the full intended dependency set.
               yum install -y \
+                git \
                 devtoolset-7-gcc devtoolset-7-gcc-c++ devtoolset-7-binutils \
                 cmake3 \
                 flex \
