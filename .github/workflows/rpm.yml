@@ -137,20 +137,20 @@ jobs:
             -v "$PWD:/workspace:z" \
             -w /workspace \
             centos:7 bash -exc '
-              # Fix CentOS 7 repos to use vault (EOL June 2024)
+              # Fix CentOS 7 repos to use vault over HTTPS (EOL June 2024)
               sed -i "s/mirrorlist/#mirrorlist/g" /etc/yum.repos.d/CentOS-*.repo
-              sed -i "s|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g" \
+              sed -i "s|#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" \
                 /etc/yum.repos.d/CentOS-*.repo
 
               # Install EPEL and SCL
               yum install -y epel-release centos-release-scl
 
-              # Fix SCL repos to use vault (centos-release-scl creates new
-              # repo files that still point to the dead mirrorlist.centos.org)
+              # Fix SCL repos to use vault over HTTPS (centos-release-scl
+              # creates new repo files that still point to mirrorlist.centos.org)
               for f in /etc/yum.repos.d/CentOS-SCLo-*.repo; do
                 [ -f "$f" ] || continue
                 sed -i "s/mirrorlist=/#mirrorlist=/g" "$f"
-                sed -i "s|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g" "$f"
+                sed -i "s|#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" "$f"
               done
 
               # Install build dependencies.
@@ -178,7 +178,7 @@ jobs:
 
               source /opt/rh/devtoolset-9/enable
 
-              cmake3 -S . -B build \
+              cmake3 -S . -B build -GNinja \
                 -DBUILD_wireshark=ON \
                 -DUSE_qt6=OFF \
                 -DENABLE_WERROR=OFF
@@ -229,9 +229,9 @@ jobs:
             -v "$PWD:/workspace:z" \
             -w /workspace \
             centos:6 bash -exc '
-              # Fix CentOS 6 repos to use vault (EOL November 2020)
+              # Fix CentOS 6 repos to use vault over HTTPS (EOL November 2020)
               sed -i "s/mirrorlist/#mirrorlist/g" /etc/yum.repos.d/CentOS-*.repo
-              sed -i "s|#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=http://vault.centos.org/centos/6|g" \
+              sed -i "s|#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=https://vault.centos.org/centos/6|g" \
                 /etc/yum.repos.d/CentOS-*.repo
 
               # Install EPEL 6 (archived)
@@ -241,12 +241,12 @@ jobs:
               # Install SCL for devtoolset-7 (maximum available for EL6, provides GCC 7 with C++17)
               yum install -y centos-release-scl
 
-              # Fix SCL repos to use vault (centos-release-scl creates new
-              # repo files that still point to the dead mirrorlist.centos.org)
+              # Fix SCL repos to use vault over HTTPS (centos-release-scl
+              # creates new repo files that still point to mirrorlist.centos.org)
               for f in /etc/yum.repos.d/CentOS-SCLo-*.repo; do
                 [ -f "$f" ] || continue
                 sed -i "s/mirrorlist=/#mirrorlist=/g" "$f"
-                sed -i "s|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g" "$f"
+                sed -i "s|#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" "$f"
               done
 
               # Install build dependencies.
