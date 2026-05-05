@@ -191,6 +191,14 @@ jobs:
               ./configure --prefix=/usr/local --disable-nls --disable-doc --quiet
               make -j$(nproc)
               make install
+              # Register /usr/local/lib in the dynamic linker so the shared
+              # library is found during the libgcrypt configure link test.
+              echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
+              ldconfig
+              # libgpg-error >= 1.33 ships gpgrt-config instead of the old
+              # gpg-error-config.  libgcrypt 1.8.x configure still calls
+              # gpg-error-config, so provide a compatibility symlink.
+              ln -sf /usr/local/bin/gpgrt-config /usr/local/bin/gpg-error-config
               cd /workspace
 
               curl -fsSL https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.8.9.tar.bz2 \
@@ -200,7 +208,6 @@ jobs:
                 --with-libgpg-error-prefix=/usr/local --disable-doc --quiet
               make -j$(nproc)
               make install
-              echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
               ldconfig
               cd /workspace
 
