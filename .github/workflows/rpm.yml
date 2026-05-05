@@ -1,0 +1,301 @@
+name: Build EL RPMs
+
+# Build Wireshark RPM packages for Enterprise Linux 6, 7, and 8.
+#
+# EL8 (AlmaLinux 8):  Fully supported. Uses standard EPEL and PowerTools repos.
+# EL7 (CentOS 7):     Supported using EPEL + SCL devtoolset-9 (GCC 9, C++17).
+#                     CentOS 7 reached EOL June 30, 2024; vault repos are used.
+# EL6 (CentOS 6):     Best-effort. Known blockers prevent a successful build of
+#                     the current Wireshark source on EL6:
+#                       - glib2 2.28 shipped in EL6 does not meet the >= 2.54
+#                         requirement in the Wireshark build system.
+#                       - cmake3 3.6.x in EPEL 6 does not meet the >= 3.13
+#                         requirement.
+#                     The job infrastructure is included so that it can be
+#                     updated if/when these constraints are resolved.
+#                     The ubuntu-latest runner is used instead of a centos:6
+#                     container because CentOS 6 (glibc 2.12) is incompatible
+#                     with the Node.js 20 runtime required by actions/checkout.
+
+on: [push]
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # Enterprise Linux 8 – AlmaLinux 8
+  # ---------------------------------------------------------------------------
+  el8:
+    name: Build EL8 RPMs
+    runs-on: ubuntu-latest
+    container: almalinux:8
+    steps:
+      - name: Install git
+        run: dnf install -y git
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Enable EPEL and PowerTools repositories
+        run: |
+          dnf install -y epel-release
+          dnf install -y 'dnf-command(config-manager)'
+          dnf config-manager --set-enabled powertools
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            cmake \
+            gcc gcc-c++ \
+            flex \
+            ninja-build \
+            python3 \
+            glib2-devel \
+            libpcap-devel \
+            zlib-devel \
+            libgcrypt-devel \
+            pcre2-devel \
+            c-ares-devel \
+            speexdsp-devel \
+            libxml2-devel \
+            libcap-devel \
+            krb5-devel \
+            lz4-devel \
+            snappy-devel \
+            libmaxminddb-devel \
+            gnutls-devel \
+            brotli-devel \
+            libzstd-devel \
+            nghttp2-devel \
+            opus-devel \
+            qt5-qtbase-devel \
+            qt5-qtmultimedia-devel \
+            qt5-linguist \
+            desktop-file-utils \
+            hicolor-icon-theme \
+            rpm-build \
+            rubygem-asciidoctor
+
+      - name: Set release version
+        run: python3 tools/make-version.py --set-release .
+
+      - name: Configure build
+        run: |
+          cmake -S . -B build -GNinja \
+            -DBUILD_wireshark=ON \
+            -DUSE_qt6=OFF \
+            -DENABLE_WERROR=OFF
+
+      - name: Build source tarball
+        run: cmake --build build --target dist
+
+      - name: Build RPMs
+        run: cmake --build build --target wireshark_rpm
+
+      - name: Collect RPMs
+        run: |
+          mkdir rpm-el8
+          find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el8/ \;
+
+      - name: Upload EL8 RPMs
+        uses: actions/upload-artifact@v6
+        with:
+          name: wireshark-el8-rpms
+          path: rpm-el8
+
+  # ---------------------------------------------------------------------------
+  # Enterprise Linux 7 – CentOS 7
+  # Uses SCL devtoolset-9 (GCC 9) for C++17 support and cmake3 from EPEL.
+  # ---------------------------------------------------------------------------
+  el7:
+    name: Build EL7 RPMs
+    runs-on: ubuntu-latest
+    container: centos:7
+    steps:
+      - name: Fix CentOS 7 repositories (vault mirrors, post-EOL)
+        run: |
+          sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*.repo
+          sed -i \
+            's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' \
+            /etc/yum.repos.d/CentOS-*.repo
+
+      - name: Install git
+        run: yum install -y git
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Enable EPEL and SCL release packages
+        run: yum install -y epel-release centos-release-scl
+
+      - name: Fix SCL repositories (vault mirrors, post-EOL)
+        run: |
+          for f in /etc/yum.repos.d/CentOS-SCLo-*.repo; do
+            [ -f "$f" ] || continue
+            sed -i 's/mirrorlist/#mirrorlist/g' "$f"
+            sed -i \
+              's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' \
+              "$f"
+          done
+
+      - name: Install build dependencies
+        run: |
+          yum install -y \
+            devtoolset-9-gcc devtoolset-9-gcc-c++ devtoolset-9-binutils \
+            cmake3 cmake3-rpm-macros \
+            flex \
+            ninja-build \
+            python3 \
+            glib2-devel \
+            libpcap-devel \
+            zlib-devel \
+            libgcrypt-devel \
+            pcre2-devel \
+            c-ares-devel \
+            speexdsp-devel \
+            libxml2-devel \
+            libcap-devel \
+            krb5-devel \
+            lz4-devel \
+            snappy-devel \
+            libmaxminddb-devel \
+            gnutls-devel \
+            nghttp2-devel \
+            opus-devel \
+            qt5-qtbase-devel \
+            qt5-qtmultimedia-devel \
+            qt5-linguist \
+            desktop-file-utils \
+            hicolor-icon-theme \
+            rpm-build \
+            rubygem-asciidoctor
+
+      - name: Configure devtoolset-9 compilers for rpmbuild
+        run: |
+          # Override the RPM %__cc/%__cxx macros so that rpmbuild invokes the
+          # devtoolset-9 GCC (version 9, full C++17 support) rather than the
+          # system-default GCC 4.8.5 which does not support C++17.
+          echo '%__cc  /opt/rh/devtoolset-9/root/usr/bin/gcc' >> /etc/rpm/macros
+          echo '%__cxx /opt/rh/devtoolset-9/root/usr/bin/g++' >> /etc/rpm/macros
+          # Provide gcc/g++ on a PATH that cmake and rpmbuild can find.
+          ln -sf /opt/rh/devtoolset-9/root/usr/bin/gcc /usr/local/bin/gcc
+          ln -sf /opt/rh/devtoolset-9/root/usr/bin/g++ /usr/local/bin/g++
+
+      - name: Set release version
+        run: source /opt/rh/devtoolset-9/enable && python3 tools/make-version.py --set-release .
+
+      - name: Configure, build tarball, and build RPMs
+        run: |
+          source /opt/rh/devtoolset-9/enable
+          cmake3 -S . -B build \
+            -DBUILD_wireshark=ON \
+            -DUSE_qt6=OFF \
+            -DENABLE_WERROR=OFF
+          cmake3 --build build --target dist
+          cmake3 --build build --target wireshark_rpm
+
+      - name: Collect RPMs
+        run: |
+          mkdir rpm-el7
+          find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el7/ \;
+
+      - name: Upload EL7 RPMs
+        uses: actions/upload-artifact@v6
+        with:
+          name: wireshark-el7-rpms
+          path: rpm-el7
+
+  # ---------------------------------------------------------------------------
+  # Enterprise Linux 6 – CentOS 6 (best effort)
+  #
+  # The ubuntu-latest host runner is used because centos:6 (glibc 2.12) is
+  # incompatible with the Node.js 20 runtime required by actions/checkout when
+  # using the container: directive.  The full build runs inside a centos:6
+  # Docker container via "docker run".
+  #
+  # KNOWN BLOCKERS (build will not succeed with the current source tree):
+  #   - glib2 2.28 in CentOS 6 is below the >= 2.54.0 build requirement.
+  #   - cmake3 3.6.x in EPEL 6 is below the >= 3.13 build requirement.
+  # The job is set to continue-on-error so that it does not block other jobs.
+  # ---------------------------------------------------------------------------
+  el6:
+    name: Build EL6 RPMs (best effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set release version
+        run: python3 tools/make-version.py --set-release .
+
+      - name: Build EL6 RPMs in CentOS 6 container
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace:z" \
+            -w /workspace \
+            centos:6 bash -exc '
+              # Fix CentOS 6 repos to use vault (EOL November 2020)
+              sed -i "s/mirrorlist/#mirrorlist/g" /etc/yum.repos.d/CentOS-*.repo
+              sed -i "s|#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=http://vault.centos.org/centos/6|g" \
+                /etc/yum.repos.d/CentOS-*.repo
+
+              # Install EPEL 6 (archived)
+              yum install -y \
+                https://archives.fedoraproject.org/pub/archive/epel/6/x86_64/epel-release-6-8.noarch.rpm
+
+              # Install SCL for devtoolset-7 (maximum available for EL6, provides GCC 7 with C++17)
+              yum install -y centos-release-scl
+
+              # Install build dependencies.
+              # NOTE: EL6 ships glib2 2.28 (< required 2.54) and cmake3 3.6.x
+              # (< required 3.13). These are known blockers; the steps below
+              # document the full intended dependency set.
+              yum install -y \
+                devtoolset-7-gcc devtoolset-7-gcc-c++ devtoolset-7-binutils \
+                cmake3 \
+                flex \
+                python34 \
+                glib2-devel \
+                libpcap-devel \
+                zlib-devel \
+                libgcrypt-devel \
+                pcre-devel \
+                c-ares-devel \
+                speex-devel \
+                libxml2-devel \
+                libcap-devel \
+                krb5-devel \
+                gnutls-devel \
+                desktop-file-utils \
+                rpm-build
+
+              # Override RPM compiler macros to use devtoolset-7 GCC.
+              echo "%__cc  /opt/rh/devtoolset-7/root/usr/bin/gcc" >> /etc/rpm/macros
+              echo "%__cxx /opt/rh/devtoolset-7/root/usr/bin/g++" >> /etc/rpm/macros
+
+              source /opt/rh/devtoolset-7/enable
+
+              cmake3 -S . -B build \
+                -DBUILD_wireshark=OFF \
+                -DENABLE_WERROR=OFF
+              cmake3 --build build --target dist
+              cmake3 --build build --target wireshark_rpm
+            '
+
+      - name: Collect EL6 RPMs
+        if: always()
+        run: |
+          mkdir -p rpm-el6
+          find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el6/ \; 2>/dev/null || true
+
+      - name: Upload EL6 RPMs
+        uses: actions/upload-artifact@v6
+        with:
+          name: wireshark-el6-rpms
+          path: rpm-el6
