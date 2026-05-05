@@ -158,7 +158,7 @@ jobs:
 
               # Install build dependencies.
               # devtoolset-9: GCC 9 with full C++17 support (system GCC 4.8.5 lacks C++17)
-              # cmake3: cmake >= 3.17 from EPEL (system cmake 2.8 is too old)
+              # cmake3: cmake3-rpm-macros only; the cmake3 binary is replaced below
               yum install -y \
                 git \
                 devtoolset-9-gcc devtoolset-9-gcc-c++ devtoolset-9-binutils \
@@ -171,6 +171,15 @@ jobs:
                 qt5-qtbase-devel qt5-qtmultimedia-devel qt5-linguist \
                 desktop-file-utils hicolor-icon-theme \
                 rpm-build rubygem-asciidoctor
+
+              # cmake3 from EPEL7 is 3.17.5, but Wireshark requires cmake >= 3.20.
+              # Download the official cmake 3.28 binary and replace the system cmake3.
+              curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6-linux-x86_64.tar.gz \
+                | tar -xzf - -C /usr/local --strip-components=1
+              # /usr/local/bin/cmake is now 3.28.6; also expose it as cmake3 so that
+              # cmake3-rpm-macros (and any hardcoded /usr/bin/cmake3 callers) pick it up.
+              ln -sf /usr/local/bin/cmake /usr/local/bin/cmake3
+              ln -sf /usr/local/bin/cmake /usr/bin/cmake3
 
               # Override RPM compiler macros so rpmbuild uses devtoolset-9
               # GCC instead of the system-default GCC 4.8.5 (no C++17).
