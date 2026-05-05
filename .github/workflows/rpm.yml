@@ -200,7 +200,7 @@ jobs:
                 --with-libgpg-error-prefix=/usr/local --disable-doc --quiet
               make -j$(nproc)
               make install
-              echo /usr/local/lib > /etc/ld.so.conf.d/local.conf
+              echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
               ldconfig
               cd /workspace
 
