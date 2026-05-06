@@ -93,10 +93,11 @@ jobs:
             -DUSE_qt6=OFF \
             -DENABLE_WERROR=OFF
 
-      # Build tshark + all C unit-test programs so we can run tests before
-      # packaging.  Building the Qt GUI (wireshark) is deferred to rpmbuild.
+      # Build tshark, all C unit-test programs, plus dftest and text2pcap
+      # (required by pytest suite_dfilter and suite_dissectors).
+      # Building the Qt GUI (wireshark) is deferred to rpmbuild.
       - name: Build Wireshark binaries and test programs
-        run: cmake --build build --target tshark --target test-programs
+        run: cmake --build build --target tshark --target test-programs --target dftest --target text2pcap
 
       # Run every compiled C unit-test program individually so a single failure
       # produces a clear "FAIL: <program>" message and stops the job.
@@ -385,13 +386,12 @@ jobs:
                 desktop-file-utils hicolor-icon-theme \
                 rpm-build rubygem-asciidoctor
 
-              # cmake3 from EPEL7 was updated to >= 3.26.5 in July 2023, which
-              # meets Wireshark's cmake >= 3.20 requirement.  The previous
-              # approach of downloading a cmake 3.28 binary from cmake.org
-              # produced "cmake3: command not found" because the pre-built
-              # binary requires a newer glibc symbol than CentOS 7's glibc 2.17
-              # provides; bash reports that as "command not found" when execve
-              # fails.  Use the EPEL cmake3 package directly instead.
+              # cmake3 from EPEL7 is version 3.17.5, which is below Wireshark's
+              # cmake >= 3.20 requirement.  cmake.org prebuilt binaries for
+              # cmake 3.27+ are built on Ubuntu 20.04 and require glibc >= 2.31,
+              # but CentOS 7 only has glibc 2.17 so they fail with "command not
+              # found" (execve ENOENT on missing glibc symbol).
+              # cmake 3.28 is bootstrapped from source below using devtoolset-9.
               export PATH=/usr/local/bin:$PATH
 
               # CentOS 7 ships libgcrypt 1.5.3; Wireshark requires >= 1.8.0.
@@ -463,6 +463,28 @@ jobs:
               # Re-export so /usr/local/lib-installed pkg-config wrappers are found.
               export PATH=/usr/local/bin:$PATH
 
+              # Bootstrap cmake 3.28 from source using devtoolset-9 GCC.
+              # EPEL7 cmake3 is 3.17.5 (below Wireshark's >= 3.20 requirement)
+              # and cmake.org prebuilt binaries require glibc >= 2.31 which
+              # CentOS 7 does not provide.
+              curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6.tar.gz \
+                -o /tmp/cmake-3.28.6.tar.gz
+              tar -xzf /tmp/cmake-3.28.6.tar.gz -C /tmp
+              cd /tmp/cmake-3.28.6
+              CC=/opt/rh/devtoolset-9/root/usr/bin/gcc \
+              CXX=/opt/rh/devtoolset-9/root/usr/bin/g++ \
+              ./bootstrap --prefix=/usr/local --parallel=$(nproc) -- \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_USE_OPENSSL=OFF \
+                -DBUILD_CursesDialog=OFF \
+                -DBUILD_TESTING=OFF
+              make -j$(nproc)
+              make install
+              # Overwrite /usr/bin/cmake3 (EPEL7 3.17.5) with cmake 3.28.
+              ln -sf /usr/local/bin/cmake /usr/local/bin/cmake3
+              ln -sf /usr/local/bin/cmake /usr/bin/cmake3
+              cd /workspace
+
               # Export PKG_CONFIG_PATH so cmake finds all /usr/local-installed
               # packages (libgcrypt, c-ares, libxml2, etc.) via pkg-config before
               # the older system versions.
@@ -482,7 +504,7 @@ jobs:
               # Wireshark functional tests – run before packaging so that a
               # test failure blocks the RPM build.
               # -----------------------------------------------------------
-              cmake3 --build build --target tshark --target test-programs
+              cmake3 --build build --target tshark --target test-programs --target dftest --target text2pcap
 
               # C unit tests (run directly without pytest).
               export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
@@ -506,7 +528,9 @@ jobs:
               # all pytest versions, causing "unrecognized arguments" failures.
               python3 -m venv /tmp/pytest-env
               /tmp/pytest-env/bin/pip install --quiet pytest pytest-xdist
-              WS_BIN_PATH=build/run /tmp/pytest-env/bin/pytest \
+              export WS_BIN_PATH="$PWD/build/run"
+              export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+              /tmp/pytest-env/bin/pytest \
                 -ra -v --tb=short \
                 test/suite_unittests.py \
                 test/suite_dfilter \
@@ -893,7 +917,8 @@ jobs:
               export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 
               git config --global --add safe.directory /workspace
-              cmake3 -S . -B build -GNinja \
+              # ninja-build is not available in EPEL6; use Unix Makefiles instead.
+              cmake3 -S . -B build \
                 -DBUILD_wireshark=OFF \
                 -DUSE_qt6=OFF \
                 -DENABLE_WERROR=OFF \
