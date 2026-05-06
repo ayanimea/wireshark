@@ -128,17 +128,18 @@ jobs:
 
       # Run the pytest-based suites that do not require capture privileges or a
       # display: unit tests, display-filter engine, and dissector tests.
-      # python3-pytest-xdist is installed for -nauto parallel execution.
+      # Use pip to install pytest so we get a modern release (>= 6.0) that
+      # supports --override-ini and Wireshark's conftest.py options.
+      # AlmaLinux 8 AppStream ships pytest 3.4.2 which predates --override-ini
+      # (added in pytest 4.1), so we skip the dnf route entirely.
       - name: Run Wireshark pytest suite
         run: |
-          dnf install -y python3-pytest python3-pytest-xdist || \
-            python3 -m pip install --quiet pytest pytest-xdist
+          python3 -m pip install --quiet pytest pytest-xdist
           python3 -m pytest \
             --program-path build/run \
             --disable-capture \
             --disable-gui \
-            --override-ini="addopts=-ra -nauto" \
-            -v --tb=short \
+            -ra -v --tb=short \
             test/suite_unittests.py \
             test/suite_dfilter \
             test/suite_dissectors
@@ -450,6 +451,11 @@ jobs:
               ln -sf /opt/rh/devtoolset-9/root/usr/bin/g++ /usr/local/bin/g++
 
               source /opt/rh/devtoolset-9/enable
+
+              # devtoolset-9 enable prepends its own dirs to PATH but may not
+              # preserve /usr/local/bin additions we made before sourcing it.
+              # Re-export so cmake3 (at /usr/local/bin/cmake3) is always found.
+              export PATH=/usr/local/bin:$PATH
 
               # Export PKG_CONFIG_PATH so cmake finds all /usr/local-installed
               # packages (libgcrypt, c-ares, libxml2, etc.) via pkg-config before
@@ -819,7 +825,11 @@ jobs:
               cd /workspace
 
               # glib2 2.54.3 (CentOS 6 ships glib2 2.28; Wireshark requires >= 2.54).
-              # Uses the system pcre (pcre1) package for GRegex.
+              # --with-pcre=internal: use glib2's bundled PCRE copy instead of the
+              # system pcre1, because PKG_CONFIG_PATH=/usr/local/lib/pkgconfig does
+              # not include /usr/lib64/pkgconfig where the system pcre.pc lives, so
+              # --with-pcre=system would fail with "Package requirements (libpcre >=
+              # 8.13) were not met".
               # --disable-libmount: libmount (util-linux) is not available in
               # CentOS 6; disabling it avoids a hard configure error.
               curl -fsSL https://download.gnome.org/sources/glib/2.54/glib-2.54.3.tar.xz \
@@ -829,7 +839,7 @@ jobs:
               LDFLAGS="-Wl,-rpath,/usr/local/lib" \
               ./configure --prefix=/usr/local \
                 --disable-nls --disable-man --disable-gtk-doc \
-                --with-pcre=system \
+                --with-pcre=internal \
                 --disable-libmount
               make -j$(nproc)
               make install
