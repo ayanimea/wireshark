@@ -92,6 +92,57 @@ jobs:
             -DUSE_qt6=OFF \
             -DENABLE_WERROR=OFF
 
+      # Build tshark + all C unit-test programs so we can run tests before
+      # packaging.  Building the Qt GUI (wireshark) is deferred to rpmbuild.
+      - name: Build Wireshark binaries and test programs
+        run: cmake --build build --target tshark --target test-programs
+
+      # Run every compiled C unit-test program individually so a single failure
+      # produces a clear "FAIL: <program>" message and stops the job.
+      - name: Run Wireshark C unit tests
+        run: |
+          export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+          for prog in exntest fifo_string_cache_test oids_test reassemble_test \
+                      tvbtest wmem_test wscbor_test wscbor_enc_test \
+                      test_epan test_wsutil; do
+            echo "=== $prog ==="
+            build/run/$prog && echo "PASS: $prog" || { echo "FAIL: $prog"; exit 1; }
+          done
+
+      # Run tshark directly to verify the binary links and the dissector database
+      # loads correctly in the cmake build tree.
+      - name: Run tshark functional smoke tests
+        run: |
+          export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+          echo "--- tshark --version ---"
+          build/run/tshark --version
+          echo "--- read arp.pcap ---"
+          build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
+            && echo "PASS: tshark reads arp.pcap"
+          echo "--- display filter ---"
+          build/run/tshark -r test/captures/http.pcap -Y "http" -c 1 -q 2>/dev/null \
+            && echo "PASS: display filter works"
+          echo "--- protocol database ---"
+          build/run/tshark -G protocols 2>/dev/null | grep -q "^tcp" \
+            && echo "PASS: protocol database loads"
+
+      # Run the pytest-based suites that do not require capture privileges or a
+      # display: unit tests, display-filter engine, and dissector tests.
+      # python3-pytest-xdist is installed for -nauto parallel execution.
+      - name: Run Wireshark pytest suite
+        run: |
+          dnf install -y python3-pytest python3-pytest-xdist || \
+            python3 -m pip install --quiet pytest pytest-xdist
+          python3 -m pytest \
+            --program-path build/run \
+            --disable-capture \
+            --disable-gui \
+            --override-ini="addopts=-ra -nauto" \
+            -v --tb=short \
+            test/suite_unittests.py \
+            test/suite_dfilter \
+            test/suite_dissectors
+
       - name: Build source tarball
         run: cmake --build build --target dist
 
@@ -102,6 +153,37 @@ jobs:
         run: |
           mkdir rpm-el8
           find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el8/ \;
+
+      # Verify that the produced RPMs are valid and contain the expected
+      # binaries before uploading them as workflow artifacts.
+      - name: Verify EL8 RPMs
+        run: |
+          echo "=== RPMs produced ==="
+          ls -lh rpm-el8/
+          rpm_count=$(ls rpm-el8/*.rpm | wc -l)
+          [ "$rpm_count" -gt 0 ] || { echo "FAIL: no RPMs produced"; exit 1; }
+          echo "PASS: $rpm_count RPM(s) found"
+          for rpm in rpm-el8/*.rpm; do
+            echo "--- $rpm ---"
+            rpm -qip "$rpm"
+          done
+          base_rpm=$(ls rpm-el8/wireshark-[0-9]*.rpm 2>/dev/null | head -1)
+          rpm -qlp "$base_rpm" | grep -q 'bin/tshark' \
+            && echo "PASS: tshark binary found in base RPM" \
+            || { echo "FAIL: tshark not in base RPM"; exit 1; }
+
+      # Install the produced RPMs into the current container (all deps are
+      # already present from the build step) and verify tshark runs correctly.
+      - name: Smoke-test installed EL8 tshark
+        run: |
+          dnf install -y rpm-el8/*.rpm
+          echo "--- tshark --version (installed) ---"
+          tshark --version
+          tshark --version 2>&1 | grep -qi 'TShark' \
+            && echo "PASS: installed tshark --version succeeded"
+          echo "--- read arp.pcap (installed) ---"
+          tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
+            && echo "PASS: installed tshark reads pcap"
 
       - name: Upload EL8 RPMs
         uses: actions/upload-artifact@v6
@@ -254,6 +336,41 @@ jobs:
                 -DUSE_qt6=OFF \
                 -DENABLE_WERROR=OFF \
                 -DCMAKE_PREFIX_PATH=/usr/local
+
+              # -----------------------------------------------------------
+              # Wireshark functional tests – run before packaging so that a
+              # test failure blocks the RPM build.
+              # -----------------------------------------------------------
+              cmake3 --build build --target tshark --target test-programs
+
+              # C unit tests (run directly without pytest).
+              export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+              for prog in exntest fifo_string_cache_test oids_test reassemble_test tvbtest wmem_test wscbor_test wscbor_enc_test test_epan test_wsutil; do
+                echo "=== $prog ==="
+                build/run/$prog && echo "PASS: $prog" || { echo "FAIL: $prog"; exit 1; }
+              done
+
+              # tshark smoke test.
+              build/run/tshark --version
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
+                && echo "PASS: tshark reads arp.pcap"
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -G protocols 2>/dev/null | grep -q "^tcp" \
+                && echo "PASS: protocol database loads"
+
+              # pytest suite (Python 3.6 via python3 from EPEL7 supports f-strings
+              # used in conftest.py; suite_unittests, suite_dfilter, suite_dissectors
+              # run without capture privileges or a display).
+              pip3 install --quiet pytest pytest-xdist
+              python3 -m pytest \
+                --program-path build/run \
+                --disable-capture \
+                --disable-gui \
+                --override-ini="addopts=-ra -nauto" \
+                test/suite_unittests.py \
+                test/suite_dfilter \
+                test/suite_dissectors
+              # -----------------------------------------------------------
+
               cmake3 --build build --target dist
               cmake3 --build build --target wireshark_rpm
             '
@@ -262,6 +379,28 @@ jobs:
         run: |
           mkdir rpm-el7
           find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el7/ \;
+
+      # Verify that the produced EL7 RPMs are valid and contain the expected
+      # binaries.  rpm -qip/rpm -qlp are pure file operations (no repos needed).
+      - name: Verify EL7 RPMs
+        run: |
+          echo "=== RPMs produced ==="
+          ls -lh rpm-el7/
+          rpm_count=$(ls rpm-el7/*.rpm 2>/dev/null | wc -l)
+          [ "$rpm_count" -gt 0 ] || { echo "FAIL: no RPMs produced"; exit 1; }
+          echo "PASS: $rpm_count RPM(s) found"
+          docker run --rm \
+            -v "$PWD/rpm-el7:/rpms:z" \
+            centos:7 bash -exc '
+              for rpm in /rpms/*.rpm; do
+                echo "--- $rpm ---"
+                rpm -qip "$rpm"
+              done
+              base_rpm=$(ls /rpms/wireshark-[0-9]*.rpm 2>/dev/null | head -1)
+              rpm -qlp "$base_rpm" | grep -q "bin/tshark" \
+                && echo "PASS: tshark binary in base RPM" \
+                || { echo "FAIL: tshark not in base RPM"; exit 1; }
+            '
 
       - name: Upload EL7 RPMs
         uses: actions/upload-artifact@v6
@@ -463,6 +602,31 @@ jobs:
                 -DUSE_qt6=OFF \
                 -DENABLE_WERROR=OFF \
                 -DCMAKE_PREFIX_PATH=/usr/local
+
+              # -----------------------------------------------------------
+              # Wireshark functional tests – run before packaging so that a
+              # test failure blocks the RPM build.
+              # NOTE: CentOS 6 ships Python 3.4 which cannot parse f-strings
+              # present in test/conftest.py (Python 3.6+).  Run the compiled
+              # C unit-test programs directly instead of using pytest.
+              # -----------------------------------------------------------
+              cmake3 --build build --target tshark --target test-programs
+
+              # C unit tests (direct binary execution, no pytest needed).
+              export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+              for prog in exntest fifo_string_cache_test oids_test reassemble_test tvbtest wmem_test wscbor_test wscbor_enc_test test_epan test_wsutil; do
+                echo "=== $prog ==="
+                build/run/$prog && echo "PASS: $prog" || { echo "FAIL: $prog"; exit 1; }
+              done
+
+              # tshark smoke test.
+              build/run/tshark --version
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
+                && echo "PASS: tshark reads arp.pcap"
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -G protocols 2>/dev/null | grep -q "^tcp" \
+                && echo "PASS: protocol database loads"
+              # -----------------------------------------------------------
+
               cmake3 --build build --target dist
               cmake3 --build build --target wireshark_rpm
             '
@@ -471,6 +635,28 @@ jobs:
         run: |
           mkdir -p rpm-el6
           find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el6/ \;
+
+      # Verify that the produced EL6 RPMs are valid and contain the expected
+      # binaries.  rpm -qip/rpm -qlp are pure file operations (no repos needed).
+      - name: Verify EL6 RPMs
+        run: |
+          echo "=== RPMs produced ==="
+          ls -lh rpm-el6/
+          rpm_count=$(ls rpm-el6/*.rpm 2>/dev/null | wc -l)
+          [ "$rpm_count" -gt 0 ] || { echo "FAIL: no RPMs produced"; exit 1; }
+          echo "PASS: $rpm_count RPM(s) found"
+          docker run --rm \
+            -v "$PWD/rpm-el6:/rpms:z" \
+            centos:6 bash -exc '
+              for rpm in /rpms/*.rpm; do
+                echo "--- $rpm ---"
+                rpm -qip "$rpm"
+              done
+              base_rpm=$(ls /rpms/wireshark-[0-9]*.rpm 2>/dev/null | head -1)
+              rpm -qlp "$base_rpm" | grep -q "bin/tshark" \
+                && echo "PASS: tshark binary in base RPM" \
+                || { echo "FAIL: tshark not in base RPM"; exit 1; }
+            '
 
       - name: Upload EL6 RPMs
         uses: actions/upload-artifact@v6
