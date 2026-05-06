@@ -219,7 +219,7 @@ jobs:
               curl -fsSL https://github.com/c-ares/c-ares/releases/download/cares-1_19_1/c-ares-1.19.1.tar.gz \
                 | tar -xzf - -C /tmp
               cd /tmp/c-ares-1.19.1
-              ./configure --prefix=/usr/local
+              ./configure --prefix=/usr/local --quiet
               make -j$(nproc)
               make install
               ldconfig
