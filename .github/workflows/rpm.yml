@@ -500,6 +500,7 @@ jobs:
                 -DBUILD_sharkd=OFF \
                 -DUSE_qt6=OFF \
                 -DENABLE_WERROR=OFF \
+                -DHAVE_LINUX_IF_BONDING_H=0 \
                 -DCMAKE_PREFIX_PATH=/usr/local
 
               # -----------------------------------------------------------
@@ -934,6 +935,7 @@ jobs:
                 -DBUILD_sharkd=OFF \
                 -DUSE_qt6=OFF \
                 -DENABLE_WERROR=OFF \
+                -DHAVE_LINUX_IF_BONDING_H=0 \
                 -DCMAKE_PREFIX_PATH=/usr/local
 
               # -----------------------------------------------------------
