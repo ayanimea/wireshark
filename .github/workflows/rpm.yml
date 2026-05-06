@@ -378,7 +378,7 @@ jobs:
                 bzip2 git \
                 devtoolset-9-gcc devtoolset-9-gcc-c++ devtoolset-9-binutils \
                 cmake3 cmake3-rpm-macros \
-                flex ninja-build python3 \
+                flex ninja-build python3 rh-python38 \
                 glib2-devel libpcap-devel zlib-devel libgcrypt-devel \
                 pcre2-devel speexdsp-devel libxml2-devel \
                 libcap-devel krb5-devel lz4-devel snappy-devel \
@@ -524,13 +524,14 @@ jobs:
               WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -G protocols 2>/dev/null | grep -qi "^tcp" \
                 && echo "PASS: protocol database loads"
 
-              # pytest suite (Python 3.6 via python3 from EPEL7 supports f-strings
-              # used in conftest.py; suite_unittests, suite_dfilter, suite_dissectors
-              # run without capture privileges or a display).
+              # pytest suite using Python 3.8 (rh-python38 from SCL).
+              # CentOS 7's python3 is 3.6 which predates subprocess.run(capture_output=)
+              # added in Python 3.7.  Wireshark's subprocesstest.py uses capture_output=True
+              # in every dfilter/dissector test, causing TypeError in all affected tests.
               # Use a venv + WS_BIN_PATH for the same reasons as in the EL8 job:
               # conftest.py custom CLI options may not be parsed early enough in
               # all pytest versions, causing "unrecognized arguments" failures.
-              python3 -m venv /tmp/pytest-env
+              /opt/rh/rh-python38/root/usr/bin/python3.8 -m venv /tmp/pytest-env
               /tmp/pytest-env/bin/pip install --quiet pytest pytest-xdist
               export WS_BIN_PATH="$PWD/build/run"
               export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
@@ -931,6 +932,13 @@ jobs:
               # ninja-build is not available in EPEL6; use Unix Makefiles instead.
               # -DBUILD_sharkd=OFF: sharkd defaults to ON and requires SpeexDSP,
               # which is not available in CentOS 6 / EPEL 6.
+              # -DCMAKE_C_FLAGS="-Dstatic_assert=_Static_assert": CentOS 6 ships
+              # glibc 2.12 whose <assert.h> does not define static_assert (added in
+              # glibc 2.16 / C11).  packet-ieee80211.c uses static_assert without
+              # including <assert.h>, so the compiler treats it as an undeclared
+              # function, leaving an undefined symbol in libwireshark.so that the
+              # tshark link step cannot resolve.  Mapping static_assert to GCC's
+              # built-in _Static_assert keyword (available in gnu11 mode) fixes this.
               cmake3 -S . -B build \
                 -DBUILD_wireshark=OFF \
                 -DBUILD_sharkd=OFF \
@@ -938,6 +946,7 @@ jobs:
                 -DENABLE_WERROR=OFF \
                 -DHAVE_LINUX_IF_BONDING_H=0 \
                 -DHAVE_LINUX_SOCKIOS_H=0 \
+                "-DCMAKE_C_FLAGS=-Dstatic_assert=_Static_assert" \
                 -DCMAKE_PREFIX_PATH=/usr/local
 
               # -----------------------------------------------------------
