@@ -123,7 +123,7 @@ jobs:
           build/run/tshark -r test/captures/http.pcap -Y "http" -c 1 -q 2>/dev/null \
             && echo "PASS: display filter works"
           echo "--- protocol database ---"
-          build/run/tshark -G protocols 2>/dev/null | grep -q "^tcp" \
+          build/run/tshark -G protocols 2>/dev/null | grep -qi "^tcp" \
             && echo "PASS: protocol database loads"
 
       # Run the pytest-based suites that do not require capture privileges or a
@@ -374,12 +374,18 @@ jobs:
 
               # cmake3 from EPEL7 is 3.17.5, but Wireshark requires cmake >= 3.20.
               # Download the official cmake 3.28 binary and replace the system cmake3.
-              curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6-linux-x86_64.tar.gz \
-                | tar -xzf - -C /usr/local --strip-components=1
+              # Use separate curl + tar commands (not piped) so bash -e properly
+              # catches a download failure rather than silently continuing with a
+              # dangling symlink that causes "cmake3: command not found" later.
+              curl -fsSL \
+                -o /tmp/cmake-3.28.6-linux-x86_64.tar.gz \
+                https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6-linux-x86_64.tar.gz
+              tar -xzf /tmp/cmake-3.28.6-linux-x86_64.tar.gz -C /usr/local --strip-components=1
               # /usr/local/bin/cmake is now 3.28.6; also expose it as cmake3 so that
               # cmake3-rpm-macros (and any hardcoded /usr/bin/cmake3 callers) pick it up.
               ln -sf /usr/local/bin/cmake /usr/local/bin/cmake3
               ln -sf /usr/local/bin/cmake /usr/bin/cmake3
+              export PATH=/usr/local/bin:$PATH
 
               # CentOS 7 ships libgcrypt 1.5.3; Wireshark requires >= 1.8.0.
               # Build libgpg-error (required by libgcrypt) and libgcrypt from source
@@ -477,7 +483,7 @@ jobs:
               build/run/tshark --version
               WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
                 && echo "PASS: tshark reads arp.pcap"
-              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -G protocols 2>/dev/null | grep -q "^tcp" \
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -G protocols 2>/dev/null | grep -qi "^tcp" \
                 && echo "PASS: protocol database loads"
 
               # pytest suite (Python 3.6 via python3 from EPEL7 supports f-strings
@@ -814,6 +820,8 @@ jobs:
 
               # glib2 2.54.3 (CentOS 6 ships glib2 2.28; Wireshark requires >= 2.54).
               # Uses the system pcre (pcre1) package for GRegex.
+              # --disable-libmount: libmount (util-linux) is not available in
+              # CentOS 6; disabling it avoids a hard configure error.
               curl -fsSL https://download.gnome.org/sources/glib/2.54/glib-2.54.3.tar.xz \
                 | xz -dc | tar -xf - -C /tmp
               cd /tmp/glib-2.54.3
@@ -821,7 +829,8 @@ jobs:
               LDFLAGS="-Wl,-rpath,/usr/local/lib" \
               ./configure --prefix=/usr/local \
                 --disable-nls --disable-man --disable-gtk-doc \
-                --with-pcre=system
+                --with-pcre=system \
+                --disable-libmount
               make -j$(nproc)
               make install
               ldconfig
@@ -885,7 +894,7 @@ jobs:
               build/run/tshark --version
               WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
                 && echo "PASS: tshark reads arp.pcap"
-              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -G protocols 2>/dev/null | grep -q "^tcp" \
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -G protocols 2>/dev/null | grep -qi "^tcp" \
                 && echo "PASS: protocol database loads"
               # -----------------------------------------------------------
 
