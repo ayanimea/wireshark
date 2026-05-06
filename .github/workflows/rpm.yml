@@ -166,7 +166,7 @@ jobs:
                 cmake3 cmake3-rpm-macros \
                 flex ninja-build python3 \
                 glib2-devel libpcap-devel zlib-devel libgcrypt-devel \
-                pcre2-devel c-ares-devel speexdsp-devel libxml2-devel \
+                pcre2-devel speexdsp-devel libxml2-devel \
                 libcap-devel krb5-devel lz4-devel snappy-devel \
                 libmaxminddb-devel gnutls-devel nghttp2-devel opus-devel \
                 qt5-qtbase-devel qt5-qtmultimedia-devel qt5-linguist \
@@ -209,6 +209,17 @@ jobs:
               # PKG_CONFIG_PATH on CentOS 7, so set it explicitly.
               PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure --prefix=/usr/local \
                 --with-libgpg-error-prefix=/usr/local --disable-doc --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # CentOS 7 ships c-ares 1.10.0; Wireshark requires >= 1.13.0.
+              # Build c-ares from source and install to /usr/local.
+              curl -fsSL https://github.com/c-ares/c-ares/releases/download/cares-1_19_1/c-ares-1.19.1.tar.gz \
+                | tar -xzf - -C /tmp
+              cd /tmp/c-ares-1.19.1
+              ./configure --prefix=/usr/local
               make -j$(nproc)
               make install
               ldconfig
