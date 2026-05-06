@@ -451,8 +451,11 @@ jobs:
               export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 
               git config --global --add safe.directory /workspace
+              # Use -DBUILD_wireshark=OFF here: CentOS 7 ships Qt 5.9.x which is
+              # below the >= 5.15 minimum; the wireshark GUI build is performed
+              # inside rpmbuild which uses the RPM spec's own cmake invocation.
               cmake3 -S . -B build -GNinja \
-                -DBUILD_wireshark=ON \
+                -DBUILD_wireshark=OFF \
                 -DUSE_qt6=OFF \
                 -DENABLE_WERROR=OFF \
                 -DCMAKE_PREFIX_PATH=/usr/local
@@ -729,7 +732,7 @@ jobs:
               # the binary is replaced by a cmake 3.28 bootstrap build below.
               # python34 provides python3 needed by cmake scripts and make-version.py.
               yum install -y \
-                bzip2 git curl \
+                bzip2 git curl gettext \
                 devtoolset-7-gcc devtoolset-7-gcc-c++ devtoolset-7-binutils \
                 cmake3 cmake3-rpm-macros \
                 flex make autoconf libtool pkgconfig xz \
