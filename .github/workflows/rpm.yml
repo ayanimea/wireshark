@@ -495,7 +495,14 @@ jobs:
               # Use -DBUILD_wireshark=OFF here: CentOS 7 ships Qt 5.9.x which is
               # below the >= 5.15 minimum; the wireshark GUI build is performed
               # inside rpmbuild which uses the RPM spec's own cmake invocation.
-              cmake3 -S . -B build -GNinja \
+              # Do NOT use -GNinja: cmake detects the Ninja generator and passes
+              # --with ninja to rpmbuild.  CentOS 7 ships RPM 4.11.3 which does
+              # not support the boolean dependency syntax used in the spec:
+              #   BuildRequires: (ninja or ninja-build)
+              # RPM 4.11 requires dependency tokens to start with an alphanumeric
+              # character, '_', or '/'.  Without -GNinja cmake passes no --with
+              # ninja flag and rpmbuild falls back to make, which is available.
+              cmake3 -S . -B build \
                 -DBUILD_wireshark=OFF \
                 -DBUILD_sharkd=OFF \
                 -DUSE_qt6=OFF \
@@ -939,6 +946,15 @@ jobs:
               # function, leaving an undefined symbol in libwireshark.so that the
               # tshark link step cannot resolve.  Mapping static_assert to GCC's
               # built-in _Static_assert keyword (available in gnu11 mode) fixes this.
+              # -DCMAKE_BUILD_RPATH: Embed /usr/local/lib and the devtoolset-7
+              # runtime lib dir in the build-tree RPATH so that tshark and other
+              # binaries load the correct custom-built libraries at run time.
+              # /usr/local/lib is needed for glib2 2.54.3 (vs system glib2 2.28
+              # in /usr/lib64 – both share SONAME libglib-2.0.so.0; without an
+              # explicit RPATH the linker may pick the older one, crashing tshark).
+              # /opt/rh/devtoolset-7/root/usr/lib64 is needed for the devtoolset-7
+              # libstdc++ and libgcc_s used when GCC 7 runtime is not in the system
+              # lib path.
               cmake3 -S . -B build \
                 -DBUILD_wireshark=OFF \
                 -DBUILD_sharkd=OFF \
@@ -947,6 +963,7 @@ jobs:
                 -DHAVE_LINUX_IF_BONDING_H=0 \
                 -DHAVE_LINUX_SOCKIOS_H=0 \
                 "-DCMAKE_C_FLAGS=-Dstatic_assert=_Static_assert" \
+                "-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64" \
                 -DCMAKE_PREFIX_PATH=/usr/local
 
               # -----------------------------------------------------------
@@ -968,6 +985,11 @@ jobs:
               done
 
               # tshark smoke test.
+              # Set LD_LIBRARY_PATH as a belt-and-suspenders measure: /usr/local/lib
+              # ensures the custom glib2 2.54.3 is found before the system glib2 2.28
+              # in /usr/lib64 (both share SONAME libglib-2.0.so.0); the devtoolset-7
+              # path ensures the GCC 7 runtime (libstdc++, libgcc_s) is available.
+              export LD_LIBRARY_PATH=/usr/local/lib:/opt/rh/devtoolset-7/root/usr/lib64
               build/run/tshark --version
               WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
                 && echo "PASS: tshark reads arp.pcap"
