@@ -54,6 +54,7 @@ jobs:
             flex \
             ninja-build \
             python3 \
+            python38 \
             glib2-devel \
             libpcap-devel \
             zlib-devel \
@@ -134,10 +135,12 @@ jobs:
       # (added in pytest 4.1), so we skip the dnf route entirely.
       - name: Run Wireshark pytest suite
         run: |
-          # Use a venv so the pip-installed pytest is isolated from any
-          # system-managed packages (avoids "externally managed environment"
-          # errors on Python 3.11+ and stale system pytest on 3.6/3.8).
-          python3 -m venv /tmp/pytest-env
+          # Use Python 3.8 (python38 from AppStream) for the venv: AlmaLinux 8's
+          # default python3 is 3.6, which predates subprocess.run(capture_output=)
+          # added in Python 3.7.  Wireshark's test/subprocesstest.py passes
+          # capture_output=True to subprocess.run(), so all dfilter/dissector tests
+          # fail with TypeError under Python 3.6.
+          python3.8 -m venv /tmp/pytest-env
           /tmp/pytest-env/bin/pip install --quiet pytest pytest-xdist
           # Pass the binary directory via WS_BIN_PATH instead of --program-path.
           # --program-path is a custom option registered by test/conftest.py; in
@@ -344,10 +347,10 @@ jobs:
 
       - name: Build EL7 RPMs in CentOS 7 container
         run: |
-          docker run --rm \
+          docker run --rm -i \
             -v "$PWD:/workspace:z" \
             -w /workspace \
-            centos:7 bash -exc '
+            centos:7 bash -ex <<'EL7_BUILD'
               # Fix CentOS 7 repos to use vault over HTTPS (EOL June 2024)
               sed -i "s/mirrorlist/#mirrorlist/g" /etc/yum.repos.d/CentOS-*.repo
               sed -i "s|#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" \
@@ -357,11 +360,11 @@ jobs:
               yum install -y epel-release centos-release-scl
 
               # Unconditionally rewrite SCL repo files with known-good vault HTTPS
-              # URLs.  printf with single-quoted args cannot be used here because
-              # this entire script is already inside a single-quoted bash -exc '...'
-              # block; inner single quotes would terminate the outer string.
-              # Double-quoted echo args are safe and \$basearch prevents bash from
-              # expanding the RPM variable (which yum resolves at runtime).
+              # URLs.  The heredoc quoting (<<'EL7_BUILD') means the host shell
+              # does not expand anything, so single quotes and dollar signs are
+              # safe in comments and echo arguments throughout this script.
+              # \$basearch is kept as-is: inside bash double-quoted echo args the
+              # backslash-dollar produces a literal $basearch that yum expands.
               { echo "[centos-sclo-sclo]"; echo "name=CentOS-7 - SCLo sclo"; echo "baseurl=https://vault.centos.org/centos/7/sclo/\$basearch/sclo/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl.repo
               { echo "[centos-sclo-rh]"; echo "name=CentOS-7 - SCLo rh"; echo "baseurl=https://vault.centos.org/centos/7/sclo/\$basearch/rh/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
 
@@ -521,7 +524,7 @@ jobs:
               cp -a /usr/local/lib/libxml2.so*       /workspace/el7-custom-libs/ 2>/dev/null || true
               cp -a /opt/rh/devtoolset-9/root/usr/lib64/libstdc++.so* /workspace/el7-custom-libs/ 2>/dev/null || true
               cp -a /opt/rh/devtoolset-9/root/usr/lib64/libgcc_s.so*  /workspace/el7-custom-libs/ 2>/dev/null || true
-            '
+          EL7_BUILD
 
       - name: Collect RPMs
         run: |
@@ -721,10 +724,10 @@ jobs:
 
       - name: Build EL6 RPMs in CentOS 6 container
         run: |
-          docker run --rm \
+          docker run --rm -i \
             -v "$PWD:/workspace:z" \
             -w /workspace \
-            centos:6 bash -exc '
+            centos:6 bash -ex <<'EL6_BUILD'
               # Fix CentOS 6 repos to use vault over HTTPS (EOL November 2020)
               sed -i "s/mirrorlist/#mirrorlist/g" /etc/yum.repos.d/CentOS-*.repo
               sed -i "s|#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=https://vault.centos.org/centos/6|g" \
@@ -738,8 +741,9 @@ jobs:
               yum install -y centos-release-scl
 
               # Unconditionally rewrite SCL repo files with known-good vault HTTPS
-              # URLs (inner single quotes cannot be used inside this single-quoted
-              # bash -exc block).
+              # URLs.  The heredoc quoting (<<'EL6_BUILD') keeps this entire script
+              # safe from host-side shell expansion, so single quotes and apostrophes
+              # are allowed anywhere in comments and echo arguments.
               { echo "[centos-sclo-sclo]"; echo "name=CentOS-6 - SCLo sclo"; echo "baseurl=https://vault.centos.org/centos/6/sclo/\$basearch/sclo/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl.repo
               { echo "[centos-sclo-rh]"; echo "name=CentOS-6 - SCLo rh"; echo "baseurl=https://vault.centos.org/centos/6/sclo/\$basearch/rh/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
 
@@ -847,6 +851,7 @@ jobs:
               MSGFMT=/usr/bin/true \
               PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
               LDFLAGS="-Wl,-rpath,/usr/local/lib" \
+              CFLAGS="-Wno-error=format-overflow" \
               ./configure --prefix=/usr/local \
                 --disable-nls --disable-man --disable-gtk-doc \
                 --with-pcre=internal \
@@ -933,7 +938,7 @@ jobs:
               cp -a /usr/local/lib/libcares.so*       /workspace/el6-custom-libs/ 2>/dev/null || true
               cp -a /opt/rh/devtoolset-7/root/usr/lib64/libstdc++.so* /workspace/el6-custom-libs/ 2>/dev/null || true
               cp -a /opt/rh/devtoolset-7/root/usr/lib64/libgcc_s.so*  /workspace/el6-custom-libs/ 2>/dev/null || true
-            '
+          EL6_BUILD
 
       - name: Collect EL6 RPMs
         run: |
