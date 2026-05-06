@@ -134,11 +134,20 @@ jobs:
       # (added in pytest 4.1), so we skip the dnf route entirely.
       - name: Run Wireshark pytest suite
         run: |
-          python3 -m pip install --quiet pytest pytest-xdist
-          python3 -m pytest \
-            --program-path build/run \
-            --disable-capture \
-            --disable-gui \
+          # Use a venv so the pip-installed pytest is isolated from any
+          # system-managed packages (avoids "externally managed environment"
+          # errors on Python 3.11+ and stale system pytest on 3.6/3.8).
+          python3 -m venv /tmp/pytest-env
+          /tmp/pytest-env/bin/pip install --quiet pytest pytest-xdist
+          # Pass the binary directory via WS_BIN_PATH instead of --program-path.
+          # --program-path is a custom option registered by test/conftest.py; in
+          # some pytest versions conftest.py is not loaded early enough for
+          # custom options to be available during argument parsing, causing
+          # "unrecognized arguments" errors.  WS_BIN_PATH is an environment
+          # variable fallback that conftest.py checks unconditionally.
+          export WS_BIN_PATH="$PWD/build/run"
+          export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+          /tmp/pytest-env/bin/pytest \
             -ra -v --tb=short \
             test/suite_unittests.py \
             test/suite_dfilter \
@@ -358,7 +367,7 @@ jobs:
 
               # Install build dependencies.
               # devtoolset-9: GCC 9 with full C++17 support (system GCC 4.8.5 lacks C++17)
-              # cmake3: cmake3-rpm-macros only; the cmake3 binary is replaced below
+              # cmake3: EPEL7 cmake3 >= 3.26.5 meets Wireshark's cmake >= 3.20 requirement
               # bzip2: needed for tar -xjf when building libgcrypt from source
               yum install -y \
                 bzip2 git \
@@ -373,19 +382,13 @@ jobs:
                 desktop-file-utils hicolor-icon-theme \
                 rpm-build rubygem-asciidoctor
 
-              # cmake3 from EPEL7 is 3.17.5, but Wireshark requires cmake >= 3.20.
-              # Download the official cmake 3.28 binary and replace the system cmake3.
-              # Use separate curl + tar commands (not piped) so bash -e properly
-              # catches a download failure rather than silently continuing with a
-              # dangling symlink that causes "cmake3: command not found" later.
-              curl -fsSL \
-                -o /tmp/cmake-3.28.6-linux-x86_64.tar.gz \
-                https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6-linux-x86_64.tar.gz
-              tar -xzf /tmp/cmake-3.28.6-linux-x86_64.tar.gz -C /usr/local --strip-components=1
-              # /usr/local/bin/cmake is now 3.28.6; also expose it as cmake3 so that
-              # cmake3-rpm-macros (and any hardcoded /usr/bin/cmake3 callers) pick it up.
-              ln -sf /usr/local/bin/cmake /usr/local/bin/cmake3
-              ln -sf /usr/local/bin/cmake /usr/bin/cmake3
+              # cmake3 from EPEL7 was updated to >= 3.26.5 in July 2023, which
+              # meets Wireshark's cmake >= 3.20 requirement.  The previous
+              # approach of downloading a cmake 3.28 binary from cmake.org
+              # produced "cmake3: command not found" because the pre-built
+              # binary requires a newer glibc symbol than CentOS 7's glibc 2.17
+              # provides; bash reports that as "command not found" when execve
+              # fails.  Use the EPEL cmake3 package directly instead.
               export PATH=/usr/local/bin:$PATH
 
               # CentOS 7 ships libgcrypt 1.5.3; Wireshark requires >= 1.8.0.
@@ -454,7 +457,7 @@ jobs:
 
               # devtoolset-9 enable prepends its own dirs to PATH but may not
               # preserve /usr/local/bin additions we made before sourcing it.
-              # Re-export so cmake3 (at /usr/local/bin/cmake3) is always found.
+              # Re-export so /usr/local/lib-installed pkg-config wrappers are found.
               export PATH=/usr/local/bin:$PATH
 
               # Export PKG_CONFIG_PATH so cmake finds all /usr/local-installed
@@ -495,12 +498,13 @@ jobs:
               # pytest suite (Python 3.6 via python3 from EPEL7 supports f-strings
               # used in conftest.py; suite_unittests, suite_dfilter, suite_dissectors
               # run without capture privileges or a display).
-              pip3 install --quiet pytest pytest-xdist
-              python3 -m pytest \
-                --program-path build/run \
-                --disable-capture \
-                --disable-gui \
-                --override-ini="addopts=-ra -nauto" \
+              # Use a venv + WS_BIN_PATH for the same reasons as in the EL8 job:
+              # conftest.py custom CLI options may not be parsed early enough in
+              # all pytest versions, causing "unrecognized arguments" failures.
+              python3 -m venv /tmp/pytest-env
+              /tmp/pytest-env/bin/pip install --quiet pytest pytest-xdist
+              WS_BIN_PATH=build/run /tmp/pytest-env/bin/pytest \
+                -ra -v --tb=short \
                 test/suite_unittests.py \
                 test/suite_dfilter \
                 test/suite_dissectors
@@ -832,9 +836,15 @@ jobs:
               # 8.13) were not met".
               # --disable-libmount: libmount (util-linux) is not available in
               # CentOS 6; disabling it avoids a hard configure error.
+              # MSGFMT=/usr/bin/true: glib2 2.54.3's configure.ac calls
+              # AM_GNU_GETTEXT unconditionally (even with --disable-nls), which
+              # requires the msgfmt program.  Providing /usr/bin/true as a stub
+              # lets the check pass; since NLS is disabled, msgfmt is never
+              # actually invoked during the build.
               curl -fsSL https://download.gnome.org/sources/glib/2.54/glib-2.54.3.tar.xz \
                 | xz -dc | tar -xf - -C /tmp
               cd /tmp/glib-2.54.3
+              MSGFMT=/usr/bin/true \
               PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
               LDFLAGS="-Wl,-rpath,/usr/local/lib" \
               ./configure --prefix=/usr/local \
