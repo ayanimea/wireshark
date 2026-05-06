@@ -154,6 +154,126 @@ jobs:
           mkdir rpm-el8
           find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el8/ \;
 
+      # ─── Offline deployment bundle ───────────────────────────────────────────
+      # Produces a self-contained directory that can be copied to a fully offline
+      # machine (no internet, no compiler) and installed with two commands:
+      #   sudo bash install.sh   →  installs RPMs + any bundled runtime libs
+      #   bash test-install.sh   →  runs tshark smoke tests + pytest suite
+      - name: Bundle EL8 offline installer
+        run: |
+          # Test suites that work against an installed binary (no build tree needed).
+          mkdir -p rpm-el8/test
+          cp pytest.ini rpm-el8/
+          cp test/conftest.py test/matchers.py test/subprocesstest.py rpm-el8/test/
+          cp test/suite_clopts.py rpm-el8/test/
+          cp -r test/suite_dfilter test/suite_dissectors \
+                test/captures test/config test/keys rpm-el8/test/
+
+          # pytest 6.x wheels: pure Python (py3-none-any), no compiler needed.
+          # pytest 6.2.5 supports Python >= 3.5, covers every EL8 Python version.
+          mkdir -p rpm-el8/wheels
+          python3 -m pip download --quiet --dest rpm-el8/wheels "pytest==6.2.5"
+
+          # ── install.sh ──────────────────────────────────────────────────────
+          cat > rpm-el8/install.sh << 'INSTALL_EL8'
+          #!/usr/bin/env bash
+          # Wireshark EL8 offline installer.  Must run as root.
+          set -euo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          echo "=== Installing Wireshark (EL 8) ==="
+          echo "--- Installing Wireshark RPMs ---"
+          # rpm -Uvh resolves cross-package deps within the bundle.
+          # All required shared libraries must be present on the target system
+          # (base OS provides glib2, libpcap, gnutls, etc.; custom-libs.tar.gz
+          # provides everything else for EL7/EL6; see OFFLINE-INSTALL.md).
+          rpm -Uvh "$SCRIPT_DIR"/wireshark*.rpm
+          echo ""
+          echo "=== Done.  Verify with: tshark --version ==="
+          INSTALL_EL8
+          chmod +x rpm-el8/install.sh
+
+          # ── test-install.sh ─────────────────────────────────────────────────
+          cat > rpm-el8/test-install.sh << 'TEST_SCRIPT'
+          #!/usr/bin/env bash
+          # Wireshark post-install functional tests.
+          # python3 >= 3.6 is used for the pytest suite; no compiler or internet needed.
+          set -uo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          TSHARK=${TSHARK:-$(command -v tshark 2>/dev/null || echo /usr/bin/tshark)}
+          pass=0; fail=0
+          ok()  { echo "  PASS: $*"; pass=$((pass+1)); }
+          err() { echo "  FAIL: $*"; fail=$((fail+1)); }
+
+          echo "=== Wireshark post-install tests ==="
+          echo "tshark: $TSHARK"
+
+          echo ""
+          echo "--- 1. tshark --version ---"
+          "$TSHARK" --version 2>&1 | head -1
+          "$TSHARK" --version 2>&1 | grep -qi "TShark" \
+            && ok "tshark --version" || err "tshark --version"
+
+          echo ""
+          echo "--- 2. Protocol database ---"
+          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || echo 0)
+          [ "$count" -gt 100 ] \
+            && ok "$count protocols loaded" || err "protocol DB ($count protocols)"
+
+          echo ""
+          echo "--- 3. ARP packet dissection ---"
+          TMP=$(mktemp -d)
+          cleanup() { rm -rf "$TMP"; }
+          trap cleanup EXIT
+          # Minimal pcap: global header (24 B) + record header (16 B) + ARP request (42 B).
+          printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' > "$TMP/t.pcap"
+          printf '\x00\x00\x00\x00\x00\x00\x00\x00\x2a\x00\x00\x00\x2a\x00\x00\x00' >> "$TMP/t.pcap"
+          printf '\xff\xff\xff\xff\xff\xff\xde\xad\xbe\xef\x00\x01\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\xde\xad\xbe\xef\x00\x01\xc0\xa8\x01\x01\x00\x00\x00\x00\x00\x00\xc0\xa8\x01\xfe' >> "$TMP/t.pcap"
+          mac=$("$TSHARK" -r "$TMP/t.pcap" -T fields -e arp.src.hw_mac 2>/dev/null | head -1)
+          [ "$mac" = "de:ad:be:ef:00:01" ] \
+            && ok "ARP dissector (MAC: $mac)" || err "ARP dissector (got: $mac)"
+
+          echo ""
+          echo "--- 4. Display filter ---"
+          "$TSHARK" -r "$TMP/t.pcap" -Y "arp.opcode == 1" -c 1 -q 2>/dev/null \
+            && ok "display filter (arp.opcode == 1)" || err "display filter"
+
+          # pytest suite — runs against installed binaries via --program-path.
+          # Requires python3 >= 3.6 (f-strings in conftest.py) and bundled test/.
+          # Installs pytest from pre-downloaded wheels; no internet or compiler needed.
+          PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
+          PYMAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
+          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 6 ] \
+              && [ -d "$SCRIPT_DIR/test" ] \
+              && python3 -m pip --version >/dev/null 2>&1; then
+            echo ""
+            echo "--- 5. pytest suite (Python $PYMAJOR.$PYMINOR) ---"
+            python3 -m pip install --quiet --no-index \
+              --find-links "$SCRIPT_DIR/wheels" pytest \
+              || { echo "  WARN: could not install pytest; skipping suite"; PYMINOR=0; }
+            if [ "$PYMINOR" -ge 6 ]; then
+              python3 -m pytest \
+                --rootdir "$SCRIPT_DIR" \
+                --override-ini="addopts=-ra" \
+                --program-path /usr/bin \
+                --disable-capture \
+                --disable-gui \
+                --skip-missing-programs \
+                -v --tb=short \
+                "$SCRIPT_DIR/test/suite_dfilter" \
+                "$SCRIPT_DIR/test/suite_dissectors" \
+                "$SCRIPT_DIR/test/suite_clopts.py" \
+                && ok "pytest suite" || err "pytest suite"
+            fi
+          else
+            echo "  (skipping pytest: requires python3 >= 3.6 + pip + bundled test/)"
+          fi
+
+          echo ""
+          echo "=== Results: $pass passed, $fail failed ==="
+          [ "$fail" -eq 0 ] && exit 0 || exit 1
+          TEST_SCRIPT
+          chmod +x rpm-el8/test-install.sh
+
       # Verify that the produced RPMs are valid and contain the expected
       # binaries before uploading them as workflow artifacts.
       - name: Verify EL8 RPMs
@@ -373,12 +493,151 @@ jobs:
 
               cmake3 --build build --target dist
               cmake3 --build build --target wireshark_rpm
+              # Bundle custom runtime libraries into the workspace so the host
+              # runner can package them alongside the RPMs for offline deployment.
+              mkdir -p /workspace/el7-custom-libs
+              cp -a /usr/local/lib/libgpg-error.so*  /workspace/el7-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgcrypt.so*     /workspace/el7-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libcares.so*      /workspace/el7-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libxml2.so*       /workspace/el7-custom-libs/ 2>/dev/null || true
+              cp -a /opt/rh/devtoolset-9/root/usr/lib64/libstdc++.so* /workspace/el7-custom-libs/ 2>/dev/null || true
+              cp -a /opt/rh/devtoolset-9/root/usr/lib64/libgcc_s.so*  /workspace/el7-custom-libs/ 2>/dev/null || true
             '
 
       - name: Collect RPMs
         run: |
           mkdir rpm-el7
           find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el7/ \;
+
+      # ─── Offline deployment bundle ───────────────────────────────────────────
+      # Produces a self-contained directory that can be copied to a fully offline
+      # machine (no internet, no compiler, only rpm available) and deployed with:
+      #   sudo bash install.sh   →  deploys bundled runtime libs + installs RPMs
+      #   bash test-install.sh   →  tshark smoke tests + pytest suite (offline)
+      - name: Bundle EL7 offline installer
+        run: |
+          # Package runtime libs collected from the build container.
+          if [ -d el7-custom-libs ]; then
+            tar czf rpm-el7/custom-libs.tar.gz -C el7-custom-libs/ .
+            rm -rf el7-custom-libs/
+          fi
+
+          # Test suites that run against an installed binary (no build tree needed).
+          mkdir -p rpm-el7/test
+          cp pytest.ini rpm-el7/
+          cp test/conftest.py test/matchers.py test/subprocesstest.py rpm-el7/test/
+          cp test/suite_clopts.py rpm-el7/test/
+          cp -r test/suite_dfilter test/suite_dissectors \
+                test/captures test/config test/keys rpm-el7/test/
+
+          # pytest 6.2.5: pure Python (py3-none-any), supports Python >= 3.5.
+          # Downloaded here in CI so the target machine needs no internet access.
+          mkdir -p rpm-el7/wheels
+          python3 -m pip download --quiet --dest rpm-el7/wheels "pytest==6.2.5"
+
+          # ── install.sh ──────────────────────────────────────────────────────
+          cat > rpm-el7/install.sh << 'INSTALL_EL7'
+          #!/usr/bin/env bash
+          # Wireshark EL7 offline installer.  Must run as root.
+          # Only rpm is required; no yum, dnf, or internet access needed.
+          set -euo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          echo "=== Installing Wireshark (EL 7) ==="
+          if [ -f "$SCRIPT_DIR/custom-libs.tar.gz" ]; then
+            echo "--- Deploying bundled runtime libraries ---"
+            mkdir -p /usr/local/lib
+            tar xzf "$SCRIPT_DIR/custom-libs.tar.gz" -C /usr/local/lib/
+            echo /usr/local/lib > /etc/ld.so.conf.d/wireshark-deps.conf
+            ldconfig
+          fi
+          echo "--- Installing Wireshark RPMs ---"
+          rpm -Uvh "$SCRIPT_DIR"/wireshark*.rpm
+          echo ""
+          echo "=== Done.  Verify with: tshark --version ==="
+          INSTALL_EL7
+          chmod +x rpm-el7/install.sh
+
+          # ── test-install.sh ─────────────────────────────────────────────────
+          cat > rpm-el7/test-install.sh << 'TEST_SCRIPT'
+          #!/usr/bin/env bash
+          # Wireshark post-install functional tests.
+          # python3 >= 3.6 is used for the pytest suite; no compiler or internet needed.
+          set -uo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          TSHARK=${TSHARK:-$(command -v tshark 2>/dev/null || echo /usr/bin/tshark)}
+          pass=0; fail=0
+          ok()  { echo "  PASS: $*"; pass=$((pass+1)); }
+          err() { echo "  FAIL: $*"; fail=$((fail+1)); }
+
+          echo "=== Wireshark post-install tests ==="
+          echo "tshark: $TSHARK"
+
+          echo ""
+          echo "--- 1. tshark --version ---"
+          "$TSHARK" --version 2>&1 | head -1
+          "$TSHARK" --version 2>&1 | grep -qi "TShark" \
+            && ok "tshark --version" || err "tshark --version"
+
+          echo ""
+          echo "--- 2. Protocol database ---"
+          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || echo 0)
+          [ "$count" -gt 100 ] \
+            && ok "$count protocols loaded" || err "protocol DB ($count protocols)"
+
+          echo ""
+          echo "--- 3. ARP packet dissection ---"
+          TMP=$(mktemp -d)
+          cleanup() { rm -rf "$TMP"; }
+          trap cleanup EXIT
+          # Minimal pcap: global header (24 B) + record header (16 B) + ARP request (42 B).
+          printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' > "$TMP/t.pcap"
+          printf '\x00\x00\x00\x00\x00\x00\x00\x00\x2a\x00\x00\x00\x2a\x00\x00\x00' >> "$TMP/t.pcap"
+          printf '\xff\xff\xff\xff\xff\xff\xde\xad\xbe\xef\x00\x01\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\xde\xad\xbe\xef\x00\x01\xc0\xa8\x01\x01\x00\x00\x00\x00\x00\x00\xc0\xa8\x01\xfe' >> "$TMP/t.pcap"
+          mac=$("$TSHARK" -r "$TMP/t.pcap" -T fields -e arp.src.hw_mac 2>/dev/null | head -1)
+          [ "$mac" = "de:ad:be:ef:00:01" ] \
+            && ok "ARP dissector (MAC: $mac)" || err "ARP dissector (got: $mac)"
+
+          echo ""
+          echo "--- 4. Display filter ---"
+          "$TSHARK" -r "$TMP/t.pcap" -Y "arp.opcode == 1" -c 1 -q 2>/dev/null \
+            && ok "display filter (arp.opcode == 1)" || err "display filter"
+
+          # pytest suite — runs against installed binaries via --program-path.
+          # Requires python3 >= 3.6 (f-strings in conftest.py) and bundled test/.
+          # Installs pytest from pre-downloaded wheels; no internet or compiler needed.
+          PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
+          PYMAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
+          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 6 ] \
+              && [ -d "$SCRIPT_DIR/test" ] \
+              && python3 -m pip --version >/dev/null 2>&1; then
+            echo ""
+            echo "--- 5. pytest suite (Python $PYMAJOR.$PYMINOR) ---"
+            python3 -m pip install --quiet --no-index \
+              --find-links "$SCRIPT_DIR/wheels" pytest \
+              || { echo "  WARN: could not install pytest; skipping suite"; PYMINOR=0; }
+            if [ "$PYMINOR" -ge 6 ]; then
+              python3 -m pytest \
+                --rootdir "$SCRIPT_DIR" \
+                --override-ini="addopts=-ra" \
+                --program-path /usr/bin \
+                --disable-capture \
+                --disable-gui \
+                --skip-missing-programs \
+                -v --tb=short \
+                "$SCRIPT_DIR/test/suite_dfilter" \
+                "$SCRIPT_DIR/test/suite_dissectors" \
+                "$SCRIPT_DIR/test/suite_clopts.py" \
+                && ok "pytest suite" || err "pytest suite"
+            fi
+          else
+            echo "  (skipping pytest: requires python3 >= 3.6 + pip + bundled test/)"
+          fi
+
+          echo ""
+          echo "=== Results: $pass passed, $fail failed ==="
+          [ "$fail" -eq 0 ] && exit 0 || exit 1
+          TEST_SCRIPT
+          chmod +x rpm-el7/test-install.sh
 
       # Verify that the produced EL7 RPMs are valid and contain the expected
       # binaries.  rpm -qip/rpm -qlp are pure file operations (no repos needed).
@@ -629,12 +888,150 @@ jobs:
 
               cmake3 --build build --target dist
               cmake3 --build build --target wireshark_rpm
+              # Bundle custom runtime libraries into the workspace.
+              mkdir -p /workspace/el6-custom-libs
+              cp -a /usr/local/lib/libglib-2.0.so*    /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgobject-2.0.so* /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgmodule-2.0.so* /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgthread-2.0.so* /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libpcre2-8.so*     /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libxml2.so*        /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgpg-error.so*   /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgcrypt.so*      /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libcares.so*       /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /opt/rh/devtoolset-7/root/usr/lib64/libstdc++.so* /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /opt/rh/devtoolset-7/root/usr/lib64/libgcc_s.so*  /workspace/el6-custom-libs/ 2>/dev/null || true
             '
 
       - name: Collect EL6 RPMs
         run: |
           mkdir -p rpm-el6
           find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el6/ \;
+
+      # ─── Offline deployment bundle (EL6) ─────────────────────────────────────
+      - name: Bundle EL6 offline installer
+        run: |
+          if [ -d el6-custom-libs ]; then
+            tar czf rpm-el6/custom-libs.tar.gz -C el6-custom-libs/ .
+            rm -rf el6-custom-libs/
+          fi
+
+          mkdir -p rpm-el6/test
+          cp pytest.ini rpm-el6/
+          cp test/conftest.py test/matchers.py test/subprocesstest.py rpm-el6/test/
+          cp test/suite_clopts.py rpm-el6/test/
+          cp -r test/suite_dfilter test/suite_dissectors \
+                test/captures test/config test/keys rpm-el6/test/
+
+          # pytest 6.2.5 wheels (py3-none-any).  EL6 ships Python 3.4 which
+          # cannot run the suite (f-strings in conftest.py); the test-install.sh
+          # detects this and skips pytest automatically.
+          mkdir -p rpm-el6/wheels
+          python3 -m pip download --quiet --dest rpm-el6/wheels "pytest==6.2.5"
+
+          # ── install.sh ──────────────────────────────────────────────────────
+          cat > rpm-el6/install.sh << 'INSTALL_EL6'
+          #!/usr/bin/env bash
+          # Wireshark EL6 offline installer.  Must run as root.
+          # Only rpm is required; no yum, dnf, or internet access needed.
+          set -euo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          echo "=== Installing Wireshark (EL 6) ==="
+          if [ -f "$SCRIPT_DIR/custom-libs.tar.gz" ]; then
+            echo "--- Deploying bundled runtime libraries ---"
+            mkdir -p /usr/local/lib
+            tar xzf "$SCRIPT_DIR/custom-libs.tar.gz" -C /usr/local/lib/
+            echo /usr/local/lib > /etc/ld.so.conf.d/wireshark-deps.conf
+            ldconfig
+          fi
+          echo "--- Installing Wireshark RPMs ---"
+          rpm -Uvh "$SCRIPT_DIR"/wireshark*.rpm
+          echo ""
+          echo "=== Done.  Verify with: tshark --version ==="
+          INSTALL_EL6
+          chmod +x rpm-el6/install.sh
+
+          # ── test-install.sh ─────────────────────────────────────────────────
+          cat > rpm-el6/test-install.sh << 'TEST_SCRIPT'
+          #!/usr/bin/env bash
+          # Wireshark post-install functional tests.
+          # python3 >= 3.6 is used for the pytest suite; no compiler or internet needed.
+          set -uo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          TSHARK=${TSHARK:-$(command -v tshark 2>/dev/null || echo /usr/bin/tshark)}
+          pass=0; fail=0
+          ok()  { echo "  PASS: $*"; pass=$((pass+1)); }
+          err() { echo "  FAIL: $*"; fail=$((fail+1)); }
+
+          echo "=== Wireshark post-install tests ==="
+          echo "tshark: $TSHARK"
+
+          echo ""
+          echo "--- 1. tshark --version ---"
+          "$TSHARK" --version 2>&1 | head -1
+          "$TSHARK" --version 2>&1 | grep -qi "TShark" \
+            && ok "tshark --version" || err "tshark --version"
+
+          echo ""
+          echo "--- 2. Protocol database ---"
+          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || echo 0)
+          [ "$count" -gt 100 ] \
+            && ok "$count protocols loaded" || err "protocol DB ($count protocols)"
+
+          echo ""
+          echo "--- 3. ARP packet dissection ---"
+          TMP=$(mktemp -d)
+          cleanup() { rm -rf "$TMP"; }
+          trap cleanup EXIT
+          # Minimal pcap: global header (24 B) + record header (16 B) + ARP request (42 B).
+          printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' > "$TMP/t.pcap"
+          printf '\x00\x00\x00\x00\x00\x00\x00\x00\x2a\x00\x00\x00\x2a\x00\x00\x00' >> "$TMP/t.pcap"
+          printf '\xff\xff\xff\xff\xff\xff\xde\xad\xbe\xef\x00\x01\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\xde\xad\xbe\xef\x00\x01\xc0\xa8\x01\x01\x00\x00\x00\x00\x00\x00\xc0\xa8\x01\xfe' >> "$TMP/t.pcap"
+          mac=$("$TSHARK" -r "$TMP/t.pcap" -T fields -e arp.src.hw_mac 2>/dev/null | head -1)
+          [ "$mac" = "de:ad:be:ef:00:01" ] \
+            && ok "ARP dissector (MAC: $mac)" || err "ARP dissector (got: $mac)"
+
+          echo ""
+          echo "--- 4. Display filter ---"
+          "$TSHARK" -r "$TMP/t.pcap" -Y "arp.opcode == 1" -c 1 -q 2>/dev/null \
+            && ok "display filter (arp.opcode == 1)" || err "display filter"
+
+          # pytest suite — runs against installed binaries via --program-path.
+          # Requires python3 >= 3.6 (f-strings in conftest.py) and bundled test/.
+          # Installs pytest from pre-downloaded wheels; no internet or compiler needed.
+          PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
+          PYMAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
+          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 6 ] \
+              && [ -d "$SCRIPT_DIR/test" ] \
+              && python3 -m pip --version >/dev/null 2>&1; then
+            echo ""
+            echo "--- 5. pytest suite (Python $PYMAJOR.$PYMINOR) ---"
+            python3 -m pip install --quiet --no-index \
+              --find-links "$SCRIPT_DIR/wheels" pytest \
+              || { echo "  WARN: could not install pytest; skipping suite"; PYMINOR=0; }
+            if [ "$PYMINOR" -ge 6 ]; then
+              python3 -m pytest \
+                --rootdir "$SCRIPT_DIR" \
+                --override-ini="addopts=-ra" \
+                --program-path /usr/bin \
+                --disable-capture \
+                --disable-gui \
+                --skip-missing-programs \
+                -v --tb=short \
+                "$SCRIPT_DIR/test/suite_dfilter" \
+                "$SCRIPT_DIR/test/suite_dissectors" \
+                "$SCRIPT_DIR/test/suite_clopts.py" \
+                && ok "pytest suite" || err "pytest suite"
+            fi
+          else
+            echo "  (skipping pytest: requires python3 >= 3.6 + pip + bundled test/)"
+          fi
+
+          echo ""
+          echo "=== Results: $pass passed, $fail failed ==="
+          [ "$fail" -eq 0 ] && exit 0 || exit 1
+          TEST_SCRIPT
+          chmod +x rpm-el6/test-install.sh
 
       # Verify that the produced EL6 RPMs are valid and contain the expected
       # binaries.  rpm -qip/rpm -qlp are pure file operations (no repos needed).
