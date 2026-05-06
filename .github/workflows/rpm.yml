@@ -204,7 +204,10 @@ jobs:
               curl -fsSL https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.8.9.tar.bz2 \
                 | tar -xjf - -C /tmp
               cd /tmp/libgcrypt-1.8.9
-              ./configure --prefix=/usr/local \
+              # gpgrt-config (our gpg-error-config compat symlink) calls pkg-config
+              # internally.  /usr/local/lib/pkgconfig is not in the default
+              # PKG_CONFIG_PATH on CentOS 7, so set it explicitly.
+              PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure --prefix=/usr/local \
                 --with-libgpg-error-prefix=/usr/local --disable-doc --quiet
               make -j$(nproc)
               make install
@@ -322,9 +325,12 @@ jobs:
               source /opt/rh/devtoolset-7/enable
 
               git config --global --add safe.directory /workspace
-              cmake3 -S . -B build \
-                -DBUILD_wireshark=OFF \
-                -DENABLE_WERROR=OFF
+              # cmake3 3.6.x in EPEL6 does not support -S/-B (added in cmake 3.13).
+              # Use old-style invocation so the failure reason is the expected
+              # "CMake 3.20 or higher is required" version check, not a confusing
+              # "source directory does not exist" error.
+              mkdir -p build
+              (cd build && cmake3 .. -DBUILD_wireshark=OFF -DENABLE_WERROR=OFF)
               cmake3 --build build --target dist
               cmake3 --build build --target wireshark_rpm
             '
