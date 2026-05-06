@@ -9,17 +9,14 @@ name: Build EL RPMs
 #                     with the Node.js 24 runtime required by actions/checkout.
 #                     Build uses EPEL + SCL devtoolset-9 (GCC 9, C++17).
 #                     CentOS 7 reached EOL June 30, 2024; vault repos are used.
-# EL6 (CentOS 6):     Best-effort. Known blockers prevent a successful build of
-#                     the current Wireshark source on EL6:
-#                       - glib2 2.28 shipped in EL6 does not meet the >= 2.54
-#                         requirement in the Wireshark build system.
-#                       - cmake3 3.6.x in EPEL 6 does not meet the >= 3.13
-#                         requirement.
-#                     The job infrastructure is included so that it can be
-#                     updated if/when these constraints are resolved.
-#                     The ubuntu-latest runner is used instead of a centos:6
-#                     container because CentOS 6 (glibc 2.12) is incompatible
+# EL6 (CentOS 6):     Supported. ubuntu-latest runner + docker run centos:6
+#                     is used because CentOS 6 (glibc 2.12) is incompatible
 #                     with the Node.js 24 runtime required by actions/checkout.
+#                     Several dependencies are too old in CentOS 6 / EPEL 6 and
+#                     are built from source: cmake 3.28 (via bootstrap), glib2,
+#                     pcre2, libxml2, libgpg-error, libgcrypt, c-ares.
+#                     Build uses SCL devtoolset-7 (GCC 7, C++17).
+#                     CentOS 6 reached EOL November 2020; vault repos are used.
 
 on: [push]
 
@@ -225,6 +222,17 @@ jobs:
               ldconfig
               cd /workspace
 
+              # CentOS 7 ships libxml2 2.9.1; Wireshark requires >= 2.9.7.
+              # Build libxml2 from source and install to /usr/local.
+              curl -fsSL https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz \
+                | tar -xJf - -C /tmp
+              cd /tmp/libxml2-2.9.14
+              ./configure --prefix=/usr/local --disable-static --without-python --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
               # Override RPM compiler macros so rpmbuild uses devtoolset-9
               # GCC instead of the system-default GCC 4.8.5 (no C++17).
               echo "%__cc  /opt/rh/devtoolset-9/root/usr/bin/gcc" >> /etc/rpm/macros
@@ -235,11 +243,17 @@ jobs:
 
               source /opt/rh/devtoolset-9/enable
 
+              # Export PKG_CONFIG_PATH so cmake finds all /usr/local-installed
+              # packages (libgcrypt, c-ares, libxml2, etc.) via pkg-config before
+              # the older system versions.
+              export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+
               git config --global --add safe.directory /workspace
               cmake3 -S . -B build -GNinja \
                 -DBUILD_wireshark=ON \
                 -DUSE_qt6=OFF \
-                -DENABLE_WERROR=OFF
+                -DENABLE_WERROR=OFF \
+                -DCMAKE_PREFIX_PATH=/usr/local
               cmake3 --build build --target dist
               cmake3 --build build --target wireshark_rpm
             '
@@ -256,22 +270,29 @@ jobs:
           path: rpm-el7
 
   # ---------------------------------------------------------------------------
-  # Enterprise Linux 6 – CentOS 6 (best effort)
+  # Enterprise Linux 6 – CentOS 6
   #
   # The ubuntu-latest host runner is used because centos:6 (glibc 2.12) is
   # incompatible with the Node.js 24 runtime required by actions/checkout when
   # using the container: directive.  The full build runs inside a centos:6
   # Docker container via "docker run".
   #
-  # KNOWN BLOCKERS (build will not succeed with the current source tree):
-  #   - glib2 2.28 in CentOS 6 is below the >= 2.54.0 build requirement.
-  #   - cmake3 3.6.x in EPEL 6 is below the >= 3.13 build requirement.
-  # The job is set to continue-on-error so that it does not block other jobs.
+  # The following dependencies are too old (or absent) in CentOS 6 / EPEL 6
+  # and are therefore built from source, installed under /usr/local:
+  #   cmake 3.28   – EPEL6 cmake3 3.6.1 does not meet the >= 3.20 requirement;
+  #                  cmake.org binaries require glibc >= 2.17 but CentOS 6 has
+  #                  glibc 2.12.  Built via cmake's own bootstrap script.
+  #   glib2 2.54   – CentOS 6 ships glib2 2.28; Wireshark requires >= 2.54.
+  #   pcre2        – Not available in CentOS 6 or EPEL 6.
+  #   libxml2      – CentOS 6 ships libxml2 2.7.6; Wireshark requires >= 2.9.7.
+  #   libgpg-error – CentOS 6 ships 1.7; libgcrypt 1.8+ requires a newer
+  #                  gpgrt-config (introduced in libgpg-error 1.33).
+  #   libgcrypt    – CentOS 6 ships 1.4.5; Wireshark requires >= 1.8.0.
+  #   c-ares       – CentOS 6 ships 1.7.0; Wireshark requires >= 1.13.0.
   # ---------------------------------------------------------------------------
   el6:
-    name: Build EL6 RPMs (best effort)
+    name: Build EL6 RPMs
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -296,61 +317,160 @@ jobs:
               yum install -y \
                 https://archives.fedoraproject.org/pub/archive/epel/6/x86_64/epel-release-6-8.noarch.rpm
 
-              # Install SCL for devtoolset-7 (maximum available for EL6, provides GCC 7 with C++17)
+              # Install SCL for devtoolset-7 (GCC 7, C++17 support)
               yum install -y centos-release-scl
 
               # Unconditionally rewrite SCL repo files with known-good vault HTTPS
-              # URLs (same root cause as EL7: inner single quotes cannot be used
-              # inside this single-quoted bash -exc '...' block).
+              # URLs (inner single quotes cannot be used inside this single-quoted
+              # bash -exc block).
               { echo "[centos-sclo-sclo]"; echo "name=CentOS-6 - SCLo sclo"; echo "baseurl=https://vault.centos.org/centos/6/sclo/\$basearch/sclo/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl.repo
               { echo "[centos-sclo-rh]"; echo "name=CentOS-6 - SCLo rh"; echo "baseurl=https://vault.centos.org/centos/6/sclo/\$basearch/rh/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
 
-              # Install build dependencies.
-              # NOTE: EL6 ships glib2 2.28 (< required 2.54) and cmake3 3.6.x
-              # (< required 3.13). These are known blockers; the steps below
-              # document the full intended dependency set.
+              # Install available build tools and system dependencies.
+              # cmake3 from EPEL6 (3.6.1) is installed only for cmake3-rpm-macros;
+              # the binary is replaced by a cmake 3.28 bootstrap build below.
+              # python34 provides python3 needed by cmake scripts and make-version.py.
               yum install -y \
-                git \
+                bzip2 git curl \
                 devtoolset-7-gcc devtoolset-7-gcc-c++ devtoolset-7-binutils \
-                cmake3 \
-                flex \
-                python34 \
-                glib2-devel \
-                libpcap-devel \
-                zlib-devel \
-                libgcrypt-devel \
-                pcre-devel \
-                c-ares-devel \
-                speex-devel \
-                libxml2-devel \
-                libcap-devel \
-                krb5-devel \
+                cmake3 cmake3-rpm-macros \
+                flex make autoconf libtool pkgconfig xz \
+                libffi-devel pcre-devel \
+                libpcap-devel zlib-devel \
+                libcap-devel krb5-devel \
                 gnutls-devel \
+                speex-devel \
+                python34 \
                 desktop-file-utils \
                 rpm-build
+
+              # Enable devtoolset-7 (GCC 7, C++17) before all from-source builds.
+              # cmake 3.28 bootstrap requires C++11; system GCC 4.4 does not support it.
+              source /opt/rh/devtoolset-7/enable
+
+              # Register devtoolset-7 runtime libs in ldconfig so that binaries
+              # compiled with it can run even when it is not explicitly sourced
+              # (e.g. when rpmbuild invokes cmake without sourcing devtoolset-7).
+              echo /opt/rh/devtoolset-7/root/usr/lib64 >> /etc/ld.so.conf.d/devtoolset-7.conf
+              echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
+              ldconfig
+
+              # python3 symlink: python34 installs python3.4; cmake and build
+              # scripts call python3.
+              ln -sf /usr/bin/python3.4 /usr/bin/python3 || true
+
+              # Build cmake 3.28.6 from source via cmake bootstrap.
+              # cmake.org binaries require glibc >= 2.17; CentOS 6 has glibc 2.12.
+              curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6.tar.gz \
+                | tar -xzf - -C /tmp
+              cd /tmp/cmake-3.28.6
+              CC=/opt/rh/devtoolset-7/root/usr/bin/gcc \
+              CXX=/opt/rh/devtoolset-7/root/usr/bin/g++ \
+              ./bootstrap --prefix=/usr/local --parallel=$(nproc) -- \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_USE_OPENSSL=OFF \
+                -DBUILD_CursesDialog=OFF
+              make -j$(nproc)
+              make install
+              ln -sf /usr/local/bin/cmake /usr/local/bin/cmake3
+              ln -sf /usr/local/bin/cmake /usr/bin/cmake3
+              cd /workspace
+
+              # libgpg-error 1.46 (CentOS 6 ships 1.7; needed for libgcrypt >= 1.8).
+              curl -fsSL https://gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-1.46.tar.bz2 \
+                | tar -xjf - -C /tmp
+              cd /tmp/libgpg-error-1.46
+              ./configure --prefix=/usr/local --disable-nls --disable-doc --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              # libgpg-error >= 1.33 ships gpgrt-config; libgcrypt 1.8.x configure
+              # still calls the old gpg-error-config name.
+              ln -sf /usr/local/bin/gpgrt-config /usr/local/bin/gpg-error-config
+              cd /workspace
+
+              # libgcrypt 1.8.9 (CentOS 6 ships 1.4.5; Wireshark requires >= 1.8.0).
+              curl -fsSL https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.8.9.tar.bz2 \
+                | tar -xjf - -C /tmp
+              cd /tmp/libgcrypt-1.8.9
+              PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+              ./configure --prefix=/usr/local \
+                --with-libgpg-error-prefix=/usr/local --disable-doc --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # c-ares 1.19.1 (CentOS 6 ships 1.7.0; Wireshark requires >= 1.13.0).
+              curl -fsSL https://github.com/c-ares/c-ares/releases/download/cares-1_19_1/c-ares-1.19.1.tar.gz \
+                | tar -xzf - -C /tmp
+              cd /tmp/c-ares-1.19.1
+              ./configure --prefix=/usr/local --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # glib2 2.54.3 (CentOS 6 ships glib2 2.28; Wireshark requires >= 2.54).
+              # Uses the system pcre (pcre1) package for GRegex.
+              curl -fsSL https://download.gnome.org/sources/glib/2.54/glib-2.54.3.tar.xz \
+                | xz -dc | tar -xf - -C /tmp
+              cd /tmp/glib-2.54.3
+              PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+              LDFLAGS="-Wl,-rpath,/usr/local/lib" \
+              ./configure --prefix=/usr/local \
+                --disable-nls --disable-man --disable-gtk-doc \
+                --with-pcre=system
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # pcre2 10.42 (not available in CentOS 6 or EPEL 6; required by Wireshark).
+              curl -fsSL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.42/pcre2-10.42.tar.bz2 \
+                | tar -xjf - -C /tmp
+              cd /tmp/pcre2-10.42
+              ./configure --prefix=/usr/local --disable-static --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # libxml2 2.9.14 (CentOS 6 ships 2.7.6; Wireshark requires >= 2.9.7).
+              curl -fsSL https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz \
+                | xz -dc | tar -xf - -C /tmp
+              cd /tmp/libxml2-2.9.14
+              ./configure --prefix=/usr/local --disable-static --without-python --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
 
               # Override RPM compiler macros to use devtoolset-7 GCC.
               echo "%__cc  /opt/rh/devtoolset-7/root/usr/bin/gcc" >> /etc/rpm/macros
               echo "%__cxx /opt/rh/devtoolset-7/root/usr/bin/g++" >> /etc/rpm/macros
+              # Expose devtoolset-7 gcc/g++ on PATH for cmake compiler auto-detection.
+              ln -sf /opt/rh/devtoolset-7/root/usr/bin/gcc /usr/local/bin/gcc
+              ln -sf /opt/rh/devtoolset-7/root/usr/bin/g++ /usr/local/bin/g++
 
-              source /opt/rh/devtoolset-7/enable
+              # Export PKG_CONFIG_PATH so cmake finds all /usr/local-installed
+              # packages before the older system versions.
+              export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 
               git config --global --add safe.directory /workspace
-              # cmake3 3.6.x in EPEL6 does not support -S/-B (added in cmake 3.13).
-              # Use old-style invocation so the failure reason is the expected
-              # "CMake 3.20 or higher is required" version check, not a confusing
-              # "source directory does not exist" error.
-              mkdir -p build
-              (cd build && cmake3 .. -DBUILD_wireshark=OFF -DENABLE_WERROR=OFF)
+              cmake3 -S . -B build -GNinja \
+                -DBUILD_wireshark=OFF \
+                -DUSE_qt6=OFF \
+                -DENABLE_WERROR=OFF \
+                -DCMAKE_PREFIX_PATH=/usr/local
               cmake3 --build build --target dist
               cmake3 --build build --target wireshark_rpm
             '
 
       - name: Collect EL6 RPMs
-        if: always()
         run: |
           mkdir -p rpm-el6
-          find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el6/ \; 2>/dev/null || true
+          find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el6/ \;
 
       - name: Upload EL6 RPMs
         uses: actions/upload-artifact@v6
