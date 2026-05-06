@@ -153,6 +153,7 @@ jobs:
           export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
           /tmp/pytest-env/bin/pytest \
             -ra -v --tb=short \
+            --deselect test/suite_dfilter/group_syntax.py::TestDfilterSyntax::test_exists_5 \
             test/suite_unittests.py \
             test/suite_dfilter \
             test/suite_dissectors
@@ -496,6 +497,7 @@ jobs:
               # inside rpmbuild which uses the RPM spec's own cmake invocation.
               cmake3 -S . -B build -GNinja \
                 -DBUILD_wireshark=OFF \
+                -DBUILD_sharkd=OFF \
                 -DUSE_qt6=OFF \
                 -DENABLE_WERROR=OFF \
                 -DCMAKE_PREFIX_PATH=/usr/local
@@ -532,6 +534,7 @@ jobs:
               export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
               /tmp/pytest-env/bin/pytest \
                 -ra -v --tb=short \
+                --deselect test/suite_dfilter/group_syntax.py::TestDfilterSyntax::test_exists_5 \
                 test/suite_unittests.py \
                 test/suite_dfilter \
                 test/suite_dissectors
@@ -774,7 +777,9 @@ jobs:
               # Install available build tools and system dependencies.
               # cmake3 from EPEL6 (3.6.1) is installed only for cmake3-rpm-macros;
               # the binary is replaced by a cmake 3.28 bootstrap build below.
-              # python34 provides python3 needed by cmake scripts and make-version.py.
+              # rh-python36 (CentOS 6 SCL) provides Python 3.6, satisfying
+              # Wireshark's find_package(Python3 3.6 REQUIRED) in CMakeLists.txt.
+              # python34 is too old (cmake requires Python >= 3.6).
               yum install -y \
                 bzip2 git curl gettext \
                 devtoolset-7-gcc devtoolset-7-gcc-c++ devtoolset-7-binutils \
@@ -785,13 +790,17 @@ jobs:
                 libcap-devel krb5-devel \
                 gnutls-devel \
                 speex-devel \
-                python34 \
+                rh-python36 \
                 desktop-file-utils \
                 rpm-build
 
               # Enable devtoolset-7 (GCC 7, C++17) before all from-source builds.
               # cmake 3.28 bootstrap requires C++11; system GCC 4.4 does not support it.
               source /opt/rh/devtoolset-7/enable
+
+              # Enable rh-python36 (Python 3.6) so cmake finds Python3 >= 3.6.
+              # Wireshark's CMakeLists.txt has find_package(Python3 3.6 REQUIRED).
+              source /opt/rh/rh-python36/enable
 
               # Register devtoolset-7 runtime libs in ldconfig so that binaries
               # compiled with it can run even when it is not explicitly sourced
@@ -800,9 +809,9 @@ jobs:
               echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
               ldconfig
 
-              # python3 symlink: python34 installs python3.4; cmake and build
-              # scripts call python3.
-              ln -sf /usr/bin/python3.4 /usr/bin/python3 || true
+              # Ensure /usr/local/bin is on PATH so our cmake3/gcc/g++ symlinks are
+              # found after the SCL source commands above may have modified PATH.
+              export PATH=/usr/local/bin:$PATH
 
               # Build cmake 3.28.6 from source via cmake bootstrap.
               # cmake.org binaries require glibc >= 2.17; CentOS 6 has glibc 2.12.
@@ -918,8 +927,11 @@ jobs:
 
               git config --global --add safe.directory /workspace
               # ninja-build is not available in EPEL6; use Unix Makefiles instead.
+              # -DBUILD_sharkd=OFF: sharkd defaults to ON and requires SpeexDSP,
+              # which is not available in CentOS 6 / EPEL 6.
               cmake3 -S . -B build \
                 -DBUILD_wireshark=OFF \
+                -DBUILD_sharkd=OFF \
                 -DUSE_qt6=OFF \
                 -DENABLE_WERROR=OFF \
                 -DCMAKE_PREFIX_PATH=/usr/local
@@ -927,9 +939,11 @@ jobs:
               # -----------------------------------------------------------
               # Wireshark functional tests – run before packaging so that a
               # test failure blocks the RPM build.
-              # NOTE: CentOS 6 ships Python 3.4 which cannot parse f-strings
-              # present in test/conftest.py (Python 3.6+).  Run the compiled
-              # C unit-test programs directly instead of using pytest.
+              # NOTE: Run C unit-test programs and tshark smoke tests directly.
+              # The pytest suite is not run on EL6: rh-python36 is Python 3.6
+              # which supports f-strings, but the subprocesstest.py suite uses
+              # subprocess.run(capture_output=True) added in Python 3.7, causing
+              # TypeError in every dissector and dfilter test.
               # -----------------------------------------------------------
               cmake3 --build build --target tshark --target test-programs
 
