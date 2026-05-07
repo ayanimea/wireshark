@@ -66010,6 +66010,29 @@ static const value_string enterprise_val[] = {
 
 value_string_ext enterprise_val_ext = VALUE_STRING_EXT_INIT(enterprise_val);
 
+/* On glibc 2.12 (CentOS 6) the dynamic linker may fail to correctly apply
+ * the R_X86_64_RELATIVE relocation for enterprise_val_ext._vs_p when the
+ * .rela.dyn section of libwireshark.so is very large (~65 000 entries from
+ * enterprise_val[]).  The result is that _vs_p holds a stale link-time
+ * offset instead of the actual runtime address, causing bsearch to scan
+ * the wrong memory and return a garbage pointer that segfaults at
+ * "return vs->strptr" in try_val_to_str_ext.
+ *
+ * This constructor function runs when the library is loaded, before any
+ * call to enterprises_lookup().  It re-initialises _vs_p from the actual
+ * runtime address of enterprise_val[] using a PC-relative load (which is
+ * always correct regardless of ASLR) and resets _vs_match2 so the normal
+ * lazy-init scan runs with the correct array pointer. */
+#if defined(__GNUC__)
+static void __attribute__((constructor))
+fixup_enterprise_val_ext(void)
+{
+    enterprise_val_ext._vs_p           = enterprise_val;
+    enterprise_val_ext._vs_num_entries = G_N_ELEMENTS(enterprise_val) - 1;
+    enterprise_val_ext._vs_match2      = _try_val_to_str_ext_init;
+}
+#endif
+
 
 static const ws_services_entry_t global_tcp_udp_services_table[] = {
 	{ 1,        "tcpmux",           "TCP Port Service Multiplexer"},

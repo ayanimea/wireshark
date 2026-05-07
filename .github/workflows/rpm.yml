@@ -546,18 +546,19 @@ jobs:
                 print "  -DBUILD_sharkd=OFF \\"
                 next
               }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
-              # 7. Enable bash job control in %build so that the %cmake macro's
-              #    background-job/fg pattern works.  cmake3-rpm-macros on CentOS 7
-              #    expands %cmake to "cmake3 args... &\nfg"; rpmbuild's /bin/sh -e
-              #    has no controlling terminal so fg fails with "no job control".
-              sed -i '/^%build$/a set -m' "$SPEC"
+              # 7. Replace the %cmake RPM macro call with an explicit cmake3 command.
+              #    cmake3-rpm-macros on CentOS 7 / EPEL7 defines %cmake3 but not
+              #    %cmake.  The Wireshark spec uses %cmake which RPM leaves as
+              #    literal text; bash then fails to execute it regardless of
+              #    whether job control (set -m) is enabled.
+              #    We replace the single "%cmake \" line with a direct cmake3
+              #    invocation (no background job, no fg) that includes the standard
+              #    install-prefix / build-type flags normally injected by the macro.
+              #    The extra flags we injected with awk above remain as continuation
+              #    lines after this replacement.
+              sed -i 's|^%cmake \\$|cmake3 -S . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_VERBOSE_MAKEFILE=ON \\|' "$SPEC"
               echo "=== Patched BuildRequires ==="
               grep "^BuildRequires" "$SPEC"
-
-              # -----------------------------------------------------------
-              # Wireshark functional tests – run before packaging so that a
-              # test failure blocks the RPM build.
-              # -----------------------------------------------------------
               cmake3 --build build --target tshark --target test-programs --target dftest --target text2pcap
 
               # C unit tests (run directly without pytest).
@@ -1062,8 +1063,17 @@ jobs:
               # Ensure LD_LIBRARY_PATH is set in the rpmbuild %build environment so
               # any test/run step inside rpmbuild finds our custom glib2 2.54.
               sed -i '/^%build$/a export LD_LIBRARY_PATH=/usr/local/lib:/opt/rh/devtoolset-7/root/usr/lib64' "$SPEC"
-              # Enable bash job control in %build so %cmake's "fg" works.
-              sed -i '/^%build$/a set -m' "$SPEC"
+              # Replace the %cmake RPM macro call with an explicit cmake3 command.
+              # cmake3-rpm-macros on CentOS 6 / EPEL6 defines %cmake3 but not
+              # %cmake.  The Wireshark spec uses %cmake which RPM leaves as
+              # literal text; bash then fails to execute it regardless of
+              # whether job control (set -m) is enabled.
+              # We replace the single "%cmake \" line with a direct cmake3
+              # invocation (no background job, no fg) that includes the standard
+              # install-prefix / build-type flags normally injected by the macro.
+              # The extra EL6-specific flags injected by awk above remain as
+              # continuation lines after this replacement.
+              sed -i 's|^%cmake \\$|cmake3 -S . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_VERBOSE_MAKEFILE=ON \\|' "$SPEC"
               echo "=== Patched BuildRequires ==="
               grep "^BuildRequires" "$SPEC"
 
