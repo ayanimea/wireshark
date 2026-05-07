@@ -546,6 +546,11 @@ jobs:
                 print "  -DBUILD_sharkd=OFF \\"
                 next
               }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
+              # 7. Enable bash job control in %build so that the %cmake macro's
+              #    background-job/fg pattern works.  cmake3-rpm-macros on CentOS 7
+              #    expands %cmake to "cmake3 args... &\nfg"; rpmbuild's /bin/sh -e
+              #    has no controlling terminal so fg fails with "no job control".
+              sed -i '/^%build$/a set -m' "$SPEC"
               echo "=== Patched BuildRequires ==="
               grep "^BuildRequires" "$SPEC"
 
@@ -971,6 +976,15 @@ jobs:
               # Expose devtoolset-7 gcc/g++ on PATH for cmake compiler auto-detection.
               ln -sf /opt/rh/devtoolset-7/root/usr/bin/gcc /usr/local/bin/gcc
               ln -sf /opt/rh/devtoolset-7/root/usr/bin/g++ /usr/local/bin/g++
+              # Use GNU gold linker: gold orders .rela.dyn entries differently
+              # from bfd, which may avoid the glibc 2.12 dynamic-linker relocation
+              # issue that causes tshark to crash in try_val_to_str_ext when it
+              # accesses enterprise_val_ext for val=5535.  Gold is shipped with
+              # devtoolset-7-binutils.  Symlinking it as ld means devtoolset-7
+              # GCC picks it up as the default linker when COLLECT_LTO_WRAPPER is
+              # not set; -fuse-ld=gold in cmake linker flags also directs GCC
+              # explicitly to use ld.gold in its bin directory.
+              ln -sf /opt/rh/devtoolset-7/root/usr/bin/ld.gold /usr/local/bin/ld.gold
 
               # Export PKG_CONFIG_PATH so cmake finds all /usr/local-installed
               # packages before the older system versions.
@@ -996,6 +1010,10 @@ jobs:
               # /opt/rh/devtoolset-7/root/usr/lib64 is needed for the devtoolset-7
               # libstdc++ and libgcc_s used when GCC 7 runtime is not in the system
               # lib path.
+              # Source devtoolset-7 so GCC 7, its linker scripts, and ld.gold
+              # are all on PATH before cmake runs.
+              source /opt/rh/devtoolset-7/enable
+              export PATH=/usr/local/bin:$PATH
               cmake3 -S . -B build \
                 -DBUILD_wireshark=OFF \
                 -DBUILD_sharkd=OFF \
@@ -1007,6 +1025,8 @@ jobs:
                 "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG" \
                 "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG" \
                 "-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64" \
+                "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold" \
+                "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold" \
                 -DCMAKE_PREFIX_PATH=/usr/local
 
               # Patch the generated spec for CentOS 6 / RPM 4.8 compatibility.
@@ -1036,11 +1056,15 @@ jobs:
                 print "  \"-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG\" \\"
                 print "  \"-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG\" \\"
                 print "  \"-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64\" \\"
+                print "  \"-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold\" \\"
+                print "  \"-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold\" \\"
                 next
               }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
               # Ensure LD_LIBRARY_PATH is set in the rpmbuild %build environment so
               # any test/run step inside rpmbuild finds our custom glib2 2.54.
               sed -i '/^%build$/a export LD_LIBRARY_PATH=/usr/local/lib:/opt/rh/devtoolset-7/root/usr/lib64' "$SPEC"
+              # Enable bash job control in %build so %cmake's "fg" works.
+              sed -i '/^%build$/a set -m' "$SPEC"
               echo "=== Patched BuildRequires ==="
               grep "^BuildRequires" "$SPEC"
 
@@ -1076,7 +1100,18 @@ jobs:
                 echo "PASS: tshark --version"
               else
                 echo "FAIL: tshark --version; collecting gdb backtrace for diagnostics"
-                gdb --batch -ex run -ex "bt 30" -ex quit \
+                gdb --batch \
+                  -ex 'set pagination off' \
+                  -ex 'handle SIGSEGV stop print pass' \
+                  -ex run \
+                  -ex 'info locals' \
+                  -ex 'info args' \
+                  -ex 'printf "enterprise_val_ext._vs_match2 = %p\n", enterprise_val_ext._vs_match2' \
+                  -ex 'printf "enterprise_val_ext._vs_p       = %p\n", enterprise_val_ext._vs_p' \
+                  -ex 'printf "enterprise_val_ext._vs_num_entries = %u\n", enterprise_val_ext._vs_num_entries' \
+                  -ex 'printf "_try_val_to_str_ext_init        = %p\n", _try_val_to_str_ext_init' \
+                  -ex 'bt 30' \
+                  -ex quit \
                   --args build/run/tshark --version 2>&1 || true
                 exit 1
               fi
