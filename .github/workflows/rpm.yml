@@ -376,11 +376,12 @@ jobs:
               # bzip2: needed for tar -xjf when building libgcrypt from source
               yum install -y \
                 bzip2 git \
+                gcc gcc-c++ \
                 devtoolset-9-gcc devtoolset-9-gcc-c++ devtoolset-9-binutils \
                 cmake3 cmake3-rpm-macros \
                 flex ninja-build python3 rh-python38 \
                 glib2-devel libpcap-devel zlib-devel libgcrypt-devel \
-                pcre2-devel speexdsp-devel libxml2-devel \
+                pcre2-devel libxml2-devel \
                 libcap-devel krb5-devel lz4-devel snappy-devel \
                 libmaxminddb-devel gnutls-devel nghttp2-devel opus-devel \
                 qt5-qtbase-devel qt5-qtmultimedia-devel qt5-linguist \
@@ -523,14 +524,22 @@ jobs:
               sed -i '/^BuildRequires:.*cares/d' "$SPEC"
               # 3. Replace all remaining "( A or B )" boolean dep expressions with A
               sed -i -E 's/^(BuildRequires:[[:space:]]*)\(([^[:space:])]+)[^)]*\)/\1\2/' "$SPEC"
-              # 4. Add /usr/local prefix path and bonding-header suppression to the
-              #    cmake invocation inside %build so rpmbuild finds our custom libraries
-              #    (libgcrypt 1.8.9, c-ares 1.19.1, libxml2 2.9.14) before system ones.
+              # 4. Remove cmake >= 3.13 BuildRequires: cmake is built from source at
+              #    /usr/local/bin; no RPM package provides cmake >= 3.13 on CentOS 7.
+              sed -i '/^BuildRequires:[[:space:]]*cmake[[:space:]]*>=/d' "$SPEC"
+              # 5. Remove speexdsp-devel BuildRequires: sharkd is disabled so speexdsp
+              #    is not needed.  speexdsp-devel is not available in standard EL7 repos.
+              sed -i '/^BuildRequires:.*speexdsp/Id' "$SPEC"
+              # 6. Add /usr/local prefix path, bonding-header suppression, and
+              #    sharkd=OFF to the cmake invocation inside %build so rpmbuild finds
+              #    our custom libraries (libgcrypt 1.8.9, c-ares 1.19.1, libxml2 2.9.14)
+              #    before system ones, and does not attempt to build sharkd.
               awk '/^%cmake \\$/ {
                 print
                 print "  -DCMAKE_PREFIX_PATH=/usr/local \\"
                 print "  -DHAVE_LINUX_IF_BONDING_H=0 \\"
                 print "  -DHAVE_LINUX_SOCKIOS_H=0 \\"
+                print "  -DBUILD_sharkd=OFF \\"
                 next
               }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
               echo "=== Patched BuildRequires ==="
@@ -817,6 +826,7 @@ jobs:
               # python34 is too old (cmake requires Python >= 3.6).
               yum install -y \
                 bzip2 git curl gettext \
+                gcc gcc-c++ \
                 devtoolset-7-gcc devtoolset-7-gcc-c++ devtoolset-7-binutils \
                 cmake3 cmake3-rpm-macros \
                 flex make autoconf libtool pkgconfig xz \
@@ -988,6 +998,8 @@ jobs:
                 -DHAVE_LINUX_IF_BONDING_H=0 \
                 -DHAVE_LINUX_SOCKIOS_H=0 \
                 "-DCMAKE_C_FLAGS=-Dstatic_assert=_Static_assert" \
+                "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O1 -g -DNDEBUG" \
+                "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O1 -g -DNDEBUG" \
                 "-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64" \
                 -DCMAKE_PREFIX_PATH=/usr/local
 
@@ -998,16 +1010,24 @@ jobs:
               sed -i '/^BuildRequires:[[:space:]]*rpm-build[[:space:]]*>=/d' "$SPEC"
               sed -i '/^BuildRequires:.*cares/d' "$SPEC"
               sed -i -E 's/^(BuildRequires:[[:space:]]*)\(([^[:space:])]+)[^)]*\)/\1\2/' "$SPEC"
+              # Remove cmake >= 3.13: cmake 3.28 is built from source, no RPM package
+              sed -i '/^BuildRequires:[[:space:]]*cmake[[:space:]]*>=/d' "$SPEC"
+              # Remove speexdsp-devel: sharkd is disabled; speexdsp-devel not in EL6 repos
+              sed -i '/^BuildRequires:.*speexdsp/Id' "$SPEC"
               # Add custom cmake flags to rpmbuild's cmake invocation so it finds
               # /usr/local libraries and matches the same compile-time flags used in
               # the pre-packaging build above (static_assert mapping, header guards,
-              # RPATH so glib2 2.54 is found at link/run time inside rpmbuild).
+              # RPATH so glib2 2.54 is found at link/run time inside rpmbuild,
+              # and -O1 optimization to avoid GCC 7 / glibc 2.12 crash in bsearch).
               awk '/^%cmake \\$/ {
                 print
                 print "  -DCMAKE_PREFIX_PATH=/usr/local \\"
                 print "  -DHAVE_LINUX_IF_BONDING_H=0 \\"
                 print "  -DHAVE_LINUX_SOCKIOS_H=0 \\"
+                print "  -DBUILD_sharkd=OFF \\"
                 print "  \"-DCMAKE_C_FLAGS=-Dstatic_assert=_Static_assert\" \\"
+                print "  \"-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O1 -g -DNDEBUG\" \\"
+                print "  \"-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O1 -g -DNDEBUG\" \\"
                 print "  \"-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64\" \\"
                 next
               }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
