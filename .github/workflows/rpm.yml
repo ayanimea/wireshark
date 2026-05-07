@@ -511,6 +511,31 @@ jobs:
                 -DHAVE_LINUX_SOCKIOS_H=0 \
                 -DCMAKE_PREFIX_PATH=/usr/local
 
+              # Patch the generated spec for CentOS 7 / RPM 4.11.3 compatibility.
+              # RPM 4.11.3 does not support boolean dep syntax "(A or B)".
+              # cmake also adds --with flags to rpmbuild for each found optional lib;
+              # the corresponding BuildRequires must be simple package names.
+              # c-ares is built from source to /usr/local; no RPM package is installed.
+              SPEC=build/packaging/rpm/SPECS/wireshark.spec
+              # 1. Remove rpm-build version constraint (4.11.3 < 4.13.0 requirement)
+              sed -i '/^BuildRequires:[[:space:]]*rpm-build[[:space:]]*>=/d' "$SPEC"
+              # 2. Remove c-ares BuildRequires (built from source, no RPM package)
+              sed -i '/^BuildRequires:.*cares/d' "$SPEC"
+              # 3. Replace all remaining "( A or B )" boolean dep expressions with A
+              sed -i -E 's/^(BuildRequires:[[:space:]]*)\(([^[:space:])]+)[^)]*\)/\1\2/' "$SPEC"
+              # 4. Add /usr/local prefix path and bonding-header suppression to the
+              #    cmake invocation inside %build so rpmbuild finds our custom libraries
+              #    (libgcrypt 1.8.9, c-ares 1.19.1, libxml2 2.9.14) before system ones.
+              awk '/^%cmake \\$/ {
+                print
+                print "  -DCMAKE_PREFIX_PATH=/usr/local \\"
+                print "  -DHAVE_LINUX_IF_BONDING_H=0 \\"
+                print "  -DHAVE_LINUX_SOCKIOS_H=0 \\"
+                next
+              }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
+              echo "=== Patched BuildRequires ==="
+              grep "^BuildRequires" "$SPEC"
+
               # -----------------------------------------------------------
               # Wireshark functional tests – run before packaging so that a
               # test failure blocks the RPM build.
@@ -966,6 +991,32 @@ jobs:
                 "-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64" \
                 -DCMAKE_PREFIX_PATH=/usr/local
 
+              # Patch the generated spec for CentOS 6 / RPM 4.8 compatibility.
+              # Same boolean-dep and rpm-build fixes as EL7, plus EL6-specific
+              # cmake flags for the static_assert mapping and RPATH.
+              SPEC=build/packaging/rpm/SPECS/wireshark.spec
+              sed -i '/^BuildRequires:[[:space:]]*rpm-build[[:space:]]*>=/d' "$SPEC"
+              sed -i '/^BuildRequires:.*cares/d' "$SPEC"
+              sed -i -E 's/^(BuildRequires:[[:space:]]*)\(([^[:space:])]+)[^)]*\)/\1\2/' "$SPEC"
+              # Add custom cmake flags to rpmbuild's cmake invocation so it finds
+              # /usr/local libraries and matches the same compile-time flags used in
+              # the pre-packaging build above (static_assert mapping, header guards,
+              # RPATH so glib2 2.54 is found at link/run time inside rpmbuild).
+              awk '/^%cmake \\$/ {
+                print
+                print "  -DCMAKE_PREFIX_PATH=/usr/local \\"
+                print "  -DHAVE_LINUX_IF_BONDING_H=0 \\"
+                print "  -DHAVE_LINUX_SOCKIOS_H=0 \\"
+                print "  \"-DCMAKE_C_FLAGS=-Dstatic_assert=_Static_assert\" \\"
+                print "  \"-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64\" \\"
+                next
+              }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
+              # Ensure LD_LIBRARY_PATH is set in the rpmbuild %build environment so
+              # any test/run step inside rpmbuild finds our custom glib2 2.54.
+              sed -i '/^%build$/a export LD_LIBRARY_PATH=/usr/local/lib:/opt/rh/devtoolset-7/root/usr/lib64' "$SPEC"
+              echo "=== Patched BuildRequires ==="
+              grep "^BuildRequires" "$SPEC"
+
               # -----------------------------------------------------------
               # Wireshark functional tests – run before packaging so that a
               # test failure blocks the RPM build.
@@ -975,7 +1026,7 @@ jobs:
               # subprocess.run(capture_output=True) added in Python 3.7, causing
               # TypeError in every dissector and dfilter test.
               # -----------------------------------------------------------
-              cmake3 --build build --target tshark --target test-programs
+              cmake3 --build build --target tshark --target test-programs --target dftest
 
               # C unit tests (direct binary execution, no pytest needed).
               export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
@@ -990,10 +1041,23 @@ jobs:
               # in /usr/lib64 (both share SONAME libglib-2.0.so.0); the devtoolset-7
               # path ensures the GCC 7 runtime (libstdc++, libgcc_s) is available.
               export LD_LIBRARY_PATH=/usr/local/lib:/opt/rh/devtoolset-7/root/usr/lib64
-              build/run/tshark --version
-              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
+              # Show which glib2 and libxml2 tshark resolves at runtime.
+              ldd build/run/tshark 2>/dev/null | grep -E "libglib|libxml2|libc\." || true
+              # Disable glib2 slice allocator to avoid potential slab-heap mismatch
+              # between our custom glib2 2.54 and the CentOS 6 glibc 2.12 allocator.
+              if G_SLICE=always-malloc build/run/tshark --version; then
+                echo "PASS: tshark --version"
+              else
+                echo "FAIL: tshark --version; collecting gdb backtrace for diagnostics"
+                gdb --batch -ex run -ex "bt 30" -ex quit \
+                  --args build/run/tshark --version 2>&1 || true
+                exit 1
+              fi
+              G_SLICE=always-malloc WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 \
+                build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
                 && echo "PASS: tshark reads arp.pcap"
-              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -G protocols 2>/dev/null | grep -qi "^tcp" \
+              G_SLICE=always-malloc WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 \
+                build/run/tshark -G protocols 2>/dev/null | grep -qi "^tcp" \
                 && echo "PASS: protocol database loads"
               # -----------------------------------------------------------
 
