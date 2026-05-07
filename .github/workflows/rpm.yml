@@ -979,12 +979,9 @@ jobs:
               # Use GNU gold linker: gold orders .rela.dyn entries differently
               # from bfd, which may avoid the glibc 2.12 dynamic-linker relocation
               # issue that causes tshark to crash in try_val_to_str_ext when it
-              # accesses enterprise_val_ext for val=5535.  Gold is shipped with
-              # devtoolset-7-binutils.  Symlinking it as ld means devtoolset-7
-              # GCC picks it up as the default linker when COLLECT_LTO_WRAPPER is
-              # not set; -fuse-ld=gold in cmake linker flags also directs GCC
-              # explicitly to use ld.gold in its bin directory.
-              ln -sf /opt/rh/devtoolset-7/root/usr/bin/ld.gold /usr/local/bin/ld.gold
+              # accesses enterprise_val_ext for val=5535.  Gold is shipped as
+              # /opt/rh/devtoolset-7/root/usr/bin/ld.gold with devtoolset-7-binutils;
+              # -fuse-ld=gold in cmake linker flags tells devtoolset-7 GCC to use it.
 
               # Export PKG_CONFIG_PATH so cmake finds all /usr/local-installed
               # packages before the older system versions.
@@ -1010,8 +1007,10 @@ jobs:
               # /opt/rh/devtoolset-7/root/usr/lib64 is needed for the devtoolset-7
               # libstdc++ and libgcc_s used when GCC 7 runtime is not in the system
               # lib path.
-              # Source devtoolset-7 so GCC 7, its linker scripts, and ld.gold
-              # are all on PATH before cmake runs.
+              # devtoolset-7 was already sourced above; re-source here so its GCC
+              # and ld.gold are definitely on PATH.  /usr/local/bin is prepended
+              # after so that our cmake3/gcc/g++ symlinks there take precedence
+              # over system binaries (they point to the same devtoolset-7 GCC).
               source /opt/rh/devtoolset-7/enable
               export PATH=/usr/local/bin:$PATH
               cmake3 -S . -B build \
