@@ -557,6 +557,14 @@ jobs:
               #    The extra flags we injected with awk above remain as continuation
               #    lines after this replacement.
               sed -i 's|^%cmake \\$|cmake3 -S . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_VERBOSE_MAKEFILE=ON \\|' "$SPEC"
+              # 8. Replace %cmake_build with an explicit make command.
+              #    On CentOS 7, %cmake_build expands to "%cmake3 --build ." which
+              #    itself uses the same "& fg" job-control pattern as %cmake.
+              #    Replacing it with a direct make invocation avoids the fg error.
+              sed -i 's|^%cmake_build$|make -j$(nproc)|' "$SPEC"
+              # 9. Replace %cmake_install with an explicit make install command.
+              #    Same root cause: %cmake_install → %cmake3 --install → bg+fg.
+              sed -i 's|^%cmake_install$|make DESTDIR=%{buildroot} install|' "$SPEC"
               echo "=== Patched BuildRequires ==="
               grep "^BuildRequires" "$SPEC"
               cmake3 --build build --target tshark --target test-programs --target dftest --target text2pcap
@@ -1009,9 +1017,8 @@ jobs:
               # libstdc++ and libgcc_s used when GCC 7 runtime is not in the system
               # lib path.
               # devtoolset-7 was already sourced above; re-source here so its GCC
-              # and ld.gold are definitely on PATH.  /usr/local/bin is prepended
-              # after so that our cmake3/gcc/g++ symlinks there take precedence
-              # over system binaries (they point to the same devtoolset-7 GCC).
+              # is definitely on PATH.  /usr/local/bin is prepended after so that
+              # our cmake3/gcc/g++ symlinks there take precedence over system binaries.
               source /opt/rh/devtoolset-7/enable
               export PATH=/usr/local/bin:$PATH
               cmake3 -S . -B build \
@@ -1025,8 +1032,6 @@ jobs:
                 "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG" \
                 "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG" \
                 "-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64" \
-                "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold" \
-                "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold" \
                 -DCMAKE_PREFIX_PATH=/usr/local
 
               # Patch the generated spec for CentOS 6 / RPM 4.8 compatibility.
@@ -1044,8 +1049,9 @@ jobs:
               # /usr/local libraries and matches the same compile-time flags used in
               # the pre-packaging build above (static_assert mapping, header guards,
               # RPATH so glib2 2.54 is found at link/run time inside rpmbuild,
-              # and -O0 to prevent GCC 7 / glibc 2.12 miscompilation of the large
-              # enterprise SNMP OID table in iana-info.c which crashes at runtime).
+              # and -O0 to prevent GCC 7 miscompilation of the large enterprise SNMP
+              # OID table in iana-info.c; the glibc 2.12 bsearch 32-bit truncation
+              # is handled by enterprise_local_bsearch() in iana-info.c itself).
               awk '/^%cmake \\$/ {
                 print
                 print "  -DCMAKE_PREFIX_PATH=/usr/local \\"
@@ -1056,8 +1062,6 @@ jobs:
                 print "  \"-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG\" \\"
                 print "  \"-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG\" \\"
                 print "  \"-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64\" \\"
-                print "  \"-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold\" \\"
-                print "  \"-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold\" \\"
                 next
               }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
               # Ensure LD_LIBRARY_PATH is set in the rpmbuild %build environment so
@@ -1074,6 +1078,11 @@ jobs:
               # The extra EL6-specific flags injected by awk above remain as
               # continuation lines after this replacement.
               sed -i 's|^%cmake \\$|cmake3 -S . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_VERBOSE_MAKEFILE=ON \\|' "$SPEC"
+              # Replace %cmake_build (expands to "%cmake3 --build ." → bg+fg) with
+              # an explicit make command that does not require job control.
+              sed -i 's|^%cmake_build$|make -j$(nproc)|' "$SPEC"
+              # Replace %cmake_install (same bg+fg root cause) with explicit make.
+              sed -i 's|^%cmake_install$|make DESTDIR=%{buildroot} install|' "$SPEC"
               echo "=== Patched BuildRequires ==="
               grep "^BuildRequires" "$SPEC"
 

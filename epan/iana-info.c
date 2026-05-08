@@ -66010,26 +66010,54 @@ static const value_string enterprise_val[] = {
 
 value_string_ext enterprise_val_ext = VALUE_STRING_EXT_INIT(enterprise_val);
 
-/* On glibc 2.12 (CentOS 6) the dynamic linker may fail to correctly apply
- * the R_X86_64_RELATIVE relocation for enterprise_val_ext._vs_p when the
- * .rela.dyn section of libwireshark.so is very large (~65 000 entries from
- * enterprise_val[]).  The result is that _vs_p holds a stale link-time
- * offset instead of the actual runtime address, causing bsearch to scan
- * the wrong memory and return a garbage pointer that segfaults at
- * "return vs->strptr" in try_val_to_str_ext.
+/* On CentOS 6 (glibc 2.12) the dynamic linker correctly applies most
+ * R_X86_64_RELATIVE relocations in libwireshark.so, but the very large
+ * .rela.dyn section (caused by the ~65 000 string-pointer entries in
+ * enterprise_val[]) triggers a path in the dynamic linker where the return
+ * value of glibc's bsearch() has its upper 32 bits zeroed.  This produces
+ * a non-mapped address in the local variable `vs' inside try_val_to_str_ext()
+ * and a SIGSEGV when the caller reads vs->strptr.
  *
  * This constructor function runs when the library is loaded, before any
- * call to enterprises_lookup().  It re-initialises _vs_p from the actual
- * runtime address of enterprise_val[] using a PC-relative load (which is
- * always correct regardless of ASLR) and resets _vs_match2 so the normal
- * lazy-init scan runs with the correct array pointer. */
+ * call to enterprises_lookup().  It:
+ *   (a) Re-initialises _vs_p from the PC-relative runtime address of
+ *       enterprise_val[] (always correct regardless of ASLR).
+ *   (b) Installs enterprise_local_bsearch() as the match function so that
+ *       all 64-bit pointer arithmetic stays within our own compiled code
+ *       and never passes through glibc's bsearch() or its PLT entry. */
 #if defined(__GNUC__)
+static const value_string *
+enterprise_local_bsearch(const uint32_t val, value_string_ext *vse _U_)
+{
+    /* Load the enterprise_val base address via a PC-relative instruction.
+     * This is always the correct runtime address regardless of ASLR and
+     * requires no external library call. */
+    const value_string * const arr = enterprise_val;
+    size_t lo = 0;
+    /* Exclude the terminating {0, NULL} sentinel from the search range. */
+    size_t hi = (size_t)(G_N_ELEMENTS(enterprise_val) - 1);
+
+    /* Standard binary search.  All arithmetic operates on the local `arr'
+     * pointer (PC-relative) and size_t indices, so no external library
+     * function is involved and 64-bit pointer integrity is guaranteed. */
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (arr[mid].value < val)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < (size_t)(G_N_ELEMENTS(enterprise_val) - 1) && arr[lo].value == val)
+        return &arr[lo];
+    return NULL;
+}
+
 static void __attribute__((constructor))
 fixup_enterprise_val_ext(void)
 {
     enterprise_val_ext._vs_p           = enterprise_val;
     enterprise_val_ext._vs_num_entries = G_N_ELEMENTS(enterprise_val) - 1;
-    enterprise_val_ext._vs_match2      = _try_val_to_str_ext_init;
+    enterprise_val_ext._vs_match2      = enterprise_local_bsearch;
 }
 #endif
 
