@@ -562,9 +562,11 @@ jobs:
               #    itself uses the same "& fg" job-control pattern as %cmake.
               #    Replacing it with a direct make invocation avoids the fg error.
               sed -i 's|^%cmake_build$|make -j$(nproc)|' "$SPEC"
-              # 9. Replace %cmake_install with an explicit make install command.
+              # 9. Replace %cmake_install (all variants) with an explicit make install.
               #    Same root cause: %cmake_install → %cmake3 --install → bg+fg.
-              sed -i 's|^%cmake_install$|make DESTDIR=%{buildroot} install|' "$SPEC"
+              #    The spec may have both bare "%cmake_install" and
+              #    "%cmake_install --component Development"; the pattern matches all.
+              sed -i 's|^%cmake_install.*$|make DESTDIR=%{buildroot} install|' "$SPEC"
               # 10. Set UTF-8 locale in %build: cmake's Python code-generation scripts
               #     (e.g. make-plugin-reg.py) open UTF-8 source files without an explicit
               #     encoding= argument.  CentOS 7's default locale is POSIX (ASCII), so
@@ -1100,8 +1102,10 @@ jobs:
               # Replace %cmake_build (expands to "%cmake3 --build ." → bg+fg) with
               # an explicit make command that does not require job control.
               sed -i 's|^%cmake_build$|make -j$(nproc)|' "$SPEC"
-              # Replace %cmake_install (same bg+fg root cause) with explicit make.
-              sed -i 's|^%cmake_install$|make DESTDIR=%{buildroot} install|' "$SPEC"
+              # Replace %cmake_install (all variants) with explicit make install.
+              # Same bg+fg root cause. The spec can have both bare %cmake_install
+              # and %cmake_install --component Development; catch both.
+              sed -i 's|^%cmake_install.*$|make DESTDIR=%{buildroot} install|' "$SPEC"
               echo "=== Patched BuildRequires ==="
               grep "^BuildRequires" "$SPEC"
 
