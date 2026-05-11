@@ -629,6 +629,9 @@ jobs:
               cp -a /usr/local/lib/libxml2.so*       /workspace/el7-custom-libs/ 2>/dev/null || true
               cp -a /opt/rh/devtoolset-9/root/usr/lib64/libstdc++.so* /workspace/el7-custom-libs/ 2>/dev/null || true
               cp -a /opt/rh/devtoolset-9/root/usr/lib64/libgcc_s.so*  /workspace/el7-custom-libs/ 2>/dev/null || true
+              # Restore ownership so the host runner (non-root) can mv/rm the
+              # root-owned files that Docker created in the mounted workspace.
+              chown -R "$(stat -c '%u:%g' /workspace)" /workspace/build /workspace/el7-custom-libs
           EL7_BUILD
 
       - name: Collect RPMs
@@ -1208,6 +1211,9 @@ jobs:
               cp -a /usr/local/lib/libcares.so*       /workspace/el6-custom-libs/ 2>/dev/null || true
               cp -a /opt/rh/devtoolset-7/root/usr/lib64/libstdc++.so* /workspace/el6-custom-libs/ 2>/dev/null || true
               cp -a /opt/rh/devtoolset-7/root/usr/lib64/libgcc_s.so*  /workspace/el6-custom-libs/ 2>/dev/null || true
+              # Restore ownership so the host runner (non-root) can mv/rm the
+              # root-owned files that Docker created in the mounted workspace.
+              chown -R "$(stat -c '%u:%g' /workspace)" /workspace/build /workspace/el6-custom-libs
           EL6_BUILD
 
       - name: Collect EL6 RPMs
