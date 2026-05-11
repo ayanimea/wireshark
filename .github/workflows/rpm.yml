@@ -508,6 +508,8 @@ jobs:
               # character, '_', or '/'.  Without -GNinja cmake passes no --with
               # ninja flag and rpmbuild falls back to make, which is available.
               cmake3 -S . -B build \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DCMAKE_INSTALL_LIBDIR=lib64 \
                 -DBUILD_wireshark=OFF \
                 -DBUILD_sharkd=OFF \
                 -DUSE_qt6=OFF \
@@ -1030,6 +1032,8 @@ jobs:
               source /opt/rh/devtoolset-7/enable
               export PATH=/usr/local/bin:$PATH
               cmake3 -S . -B build \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DCMAKE_INSTALL_LIBDIR=lib64 \
                 -DBUILD_wireshark=OFF \
                 -DBUILD_sharkd=OFF \
                 -DUSE_qt6=OFF \
