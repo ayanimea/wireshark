@@ -564,11 +564,17 @@ jobs:
               #    itself uses the same "& fg" job-control pattern as %cmake.
               #    Replacing it with a direct make invocation avoids the fg error.
               sed -i 's|^%cmake_build$|make -j$(nproc)|' "$SPEC"
-              # 9. Replace %cmake_install (all variants) with an explicit make install.
-              #    Same root cause: %cmake_install → %cmake3 --install → bg+fg.
-              #    The spec may have both bare "%cmake_install" and
-              #    "%cmake_install --component Development"; the pattern matches all.
-              sed -i 's|^%cmake_install.*$|make DESTDIR=%{buildroot} install|' "$SPEC"
+              # 9a. Replace %cmake_install --component X with cmake3 --install.
+              #     dftest, idl2wrs, headers, cmake config, and wireshark.pc are all
+              #     installed with EXCLUDE_FROM_ALL in their install() rules; plain
+              #     "make install" (the cmake-generated Makefile "install" target) skips
+              #     EXCLUDE_FROM_ALL items.  Only "cmake --install --component X"
+              #     explicitly installs them.  This fixes "File not found" errors for
+              #     %{_bindir}/dftest, %{_bindir}/idl2wrs, %{_includedir}/wireshark,
+              #     %{_libdir}/cmake/wireshark, and %{_libdir}/pkgconfig/wireshark.pc.
+              sed -i 's|^%cmake_install --component \(.*\)$|DESTDIR="%{buildroot}" cmake3 --install . --component \1|' "$SPEC"
+              # 9b. Replace bare %cmake_install with make install (all non-EXCLUDE_FROM_ALL).
+              sed -i 's|^%cmake_install$|make DESTDIR=%{buildroot} install|' "$SPEC"
               # 10. Set UTF-8 locale in %build: cmake's Python code-generation scripts
               #     (e.g. make-plugin-reg.py) open UTF-8 source files without an explicit
               #     encoding= argument.  CentOS 7's default locale is POSIX (ASCII), so
@@ -1106,10 +1112,29 @@ jobs:
               # Replace %cmake_build (expands to "%cmake3 --build ." → bg+fg) with
               # an explicit make command that does not require job control.
               sed -i 's|^%cmake_build$|make -j$(nproc)|' "$SPEC"
-              # Replace %cmake_install (all variants) with explicit make install.
-              # Same bg+fg root cause. The spec can have both bare %cmake_install
-              # and %cmake_install --component Development; catch both.
-              sed -i 's|^%cmake_install.*$|make DESTDIR=%{buildroot} install|' "$SPEC"
+              # Replace %cmake_install --component X with cmake3 --install.
+              # Same EXCLUDE_FROM_ALL reason as EL7 (see EL7 comments above).
+              sed -i 's|^%cmake_install --component \(.*\)$|DESTDIR="%{buildroot}" cmake3 --install . --component \1|' "$SPEC"
+              # Replace bare %cmake_install with make install (all non-EXCLUDE_FROM_ALL files).
+              sed -i 's|^%cmake_install$|make DESTDIR=%{buildroot} install|' "$SPEC"
+              # Fix %license: RPM 4.8 (EL6) does not support the %license macro.
+              # Without support, RPM treats the argument as a filename and reports
+              # "File must begin with /" because "COPYING" / "GPL-2.0-or-later"
+              # are not absolute paths.  Replace with %doc which RPM 4.8 understands.
+              sed -i 's|^%license |%doc |' "$SPEC"
+              # Remove the %exclude glob for the wireshark GUI binary.
+              # Qt5 is unavailable on CentOS 6, so the wireshark binary is not built
+              # and not installed.  On RPM 4.8 (EL6) an unmatched glob in a %files
+              # %exclude directive is a hard error ("File not found by glob"), whereas
+              # RPM 4.11+ (EL7) treats it as a warning.
+              sed -i '/^%exclude[[:space:]]*%{_bindir}\/wireshark/d' "$SPEC"
+              # Remove all man page entries from the spec.
+              # asciidoctor is not available on CentOS 6 / EPEL 6 so no man pages
+              # are generated.  RPM 4.8 reports "File not found by glob" as a hard
+              # error for the %{_mandir}/man1/* and %{_mandir}/man4/* globs, and
+              # similarly for the %exclude %{_mandir}/man1/wireshark.* globs.
+              sed -i '/^%{_mandir}\//d' "$SPEC"
+              sed -i '/^%exclude[[:space:]]*%{_mandir}/d' "$SPEC"
               echo "=== Patched BuildRequires ==="
               grep "^BuildRequires" "$SPEC"
 
