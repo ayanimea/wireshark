@@ -212,7 +212,8 @@ jobs:
           cat > rpm-el8/test-install.sh << 'TEST_SCRIPT'
           #!/usr/bin/env bash
           # Wireshark post-install functional tests.
-          # python3 >= 3.6 is used for the pytest suite; no compiler or internet needed.
+          # python3 >= 3.7 is required for the pytest suite (subprocess.run(capture_output=)
+          # was added in 3.7); no compiler or internet needed.
           set -uo pipefail
           SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
           TSHARK=${TSHARK:-$(command -v tshark 2>/dev/null || echo /usr/bin/tshark)}
@@ -254,11 +255,11 @@ jobs:
             && ok "display filter (arp.opcode == 1)" || err "display filter"
 
           # pytest suite — runs against installed binaries via --program-path.
-          # Requires python3 >= 3.6 (f-strings in conftest.py) and bundled test/.
-          # Installs pytest from pre-downloaded wheels; no internet or compiler needed.
+          # Requires python3 >= 3.7 (subprocess.run(capture_output=) in subprocesstest.py)
+          # and bundled test/. Installs pytest from pre-downloaded wheels; no internet needed.
           PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
           PYMAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
-          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 6 ] \
+          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 7 ] \
               && [ -d "$SCRIPT_DIR/test" ] \
               && python3 -m pip --version >/dev/null 2>&1; then
             echo ""
@@ -266,7 +267,7 @@ jobs:
             python3 -m pip install --quiet --no-index \
               --find-links "$SCRIPT_DIR/wheels" pytest \
               || { echo "  WARN: could not install pytest; skipping suite"; PYMINOR=0; }
-            if [ "$PYMINOR" -ge 6 ]; then
+            if [ "$PYMINOR" -ge 7 ]; then
               python3 -m pytest \
                 --rootdir "$SCRIPT_DIR" \
                 --override-ini="addopts=-ra" \
@@ -281,7 +282,7 @@ jobs:
                 && ok "pytest suite" || err "pytest suite"
             fi
           else
-            echo "  (skipping pytest: requires python3 >= 3.6 + pip + bundled test/)"
+            echo "  (skipping pytest: requires python3 >= 3.7 + pip + bundled test/)"
           fi
 
           echo ""
@@ -698,7 +699,8 @@ jobs:
           cat > rpm-el7/test-install.sh << 'TEST_SCRIPT'
           #!/usr/bin/env bash
           # Wireshark post-install functional tests.
-          # python3 >= 3.6 is used for the pytest suite; no compiler or internet needed.
+          # python3 >= 3.7 is required for the pytest suite (subprocess.run(capture_output=)
+          # was added in 3.7); no compiler or internet needed.
           set -uo pipefail
           SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
           TSHARK=${TSHARK:-$(command -v tshark 2>/dev/null || echo /usr/bin/tshark)}
@@ -740,11 +742,11 @@ jobs:
             && ok "display filter (arp.opcode == 1)" || err "display filter"
 
           # pytest suite — runs against installed binaries via --program-path.
-          # Requires python3 >= 3.6 (f-strings in conftest.py) and bundled test/.
-          # Installs pytest from pre-downloaded wheels; no internet or compiler needed.
+          # Requires python3 >= 3.7 (subprocess.run(capture_output=) in subprocesstest.py)
+          # and bundled test/. Installs pytest from pre-downloaded wheels; no internet needed.
           PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
           PYMAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
-          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 6 ] \
+          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 7 ] \
               && [ -d "$SCRIPT_DIR/test" ] \
               && python3 -m pip --version >/dev/null 2>&1; then
             echo ""
@@ -752,7 +754,7 @@ jobs:
             python3 -m pip install --quiet --no-index \
               --find-links "$SCRIPT_DIR/wheels" pytest \
               || { echo "  WARN: could not install pytest; skipping suite"; PYMINOR=0; }
-            if [ "$PYMINOR" -ge 6 ]; then
+            if [ "$PYMINOR" -ge 7 ]; then
               python3 -m pytest \
                 --rootdir "$SCRIPT_DIR" \
                 --override-ini="addopts=-ra" \
@@ -767,7 +769,7 @@ jobs:
                 && ok "pytest suite" || err "pytest suite"
             fi
           else
-            echo "  (skipping pytest: requires python3 >= 3.6 + pip + bundled test/)"
+            echo "  (skipping pytest: requires python3 >= 3.7 + pip + bundled test/)"
           fi
 
           echo ""
@@ -1275,7 +1277,8 @@ jobs:
           cat > rpm-el6/test-install.sh << 'TEST_SCRIPT'
           #!/usr/bin/env bash
           # Wireshark post-install functional tests.
-          # python3 >= 3.6 is used for the pytest suite; no compiler or internet needed.
+          # python3 >= 3.7 is required for the pytest suite (subprocess.run(capture_output=)
+          # was added in 3.7); no compiler or internet needed.
           set -uo pipefail
           SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
           TSHARK=${TSHARK:-$(command -v tshark 2>/dev/null || echo /usr/bin/tshark)}
@@ -1317,12 +1320,15 @@ jobs:
             && ok "display filter (arp.opcode == 1)" || err "display filter"
 
           # pytest suite — runs against installed binaries via --program-path.
-          # Requires python3 >= 3.6 (f-strings in conftest.py) and bundled test/.
-          # Note: no wheels/ are bundled for EL6 (CentOS 6 ships Python 3.4 which
-          # is below pytest's >= 3.5 requirement); test 5 will be skipped on stock EL6.
+          # Requires python3 >= 3.7 (subprocess.run(capture_output=) in subprocesstest.py),
+          # a bundled wheels/ directory, and bundled test/.
+          # Note: no wheels/ are bundled for EL6 (stock CentOS 6 ships Python 3.4 which
+          # predates the >= 3.7 requirement); test 5 will be skipped unless the user
+          # provides a compatible Python 3.7+ interpreter and a wheels/ directory.
           PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
           PYMAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
-          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 6 ] \
+          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 7 ] \
+              && [ -d "$SCRIPT_DIR/wheels" ] \
               && [ -d "$SCRIPT_DIR/test" ] \
               && python3 -m pip --version >/dev/null 2>&1; then
             echo ""
@@ -1330,7 +1336,7 @@ jobs:
             python3 -m pip install --quiet --no-index \
               --find-links "$SCRIPT_DIR/wheels" pytest \
               || { echo "  WARN: could not install pytest; skipping suite"; PYMINOR=0; }
-            if [ "$PYMINOR" -ge 6 ]; then
+            if [ "$PYMINOR" -ge 7 ]; then
               python3 -m pytest \
                 --rootdir "$SCRIPT_DIR" \
                 --override-ini="addopts=-ra" \
@@ -1345,7 +1351,7 @@ jobs:
                 && ok "pytest suite" || err "pytest suite"
             fi
           else
-            echo "  (skipping pytest: requires python3 >= 3.6 + pip + bundled test/)"
+            echo "  (skipping pytest: requires python3 >= 3.7 + pip + bundled wheels/ + test/)"
           fi
 
           echo ""

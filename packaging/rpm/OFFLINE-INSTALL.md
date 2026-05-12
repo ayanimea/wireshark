@@ -3,7 +3,7 @@
 This document explains how to install and test Wireshark on a machine that is
 **completely offline** and has **no compiler** — only `rpm` and `bash` are
 required for installation and smoke tests (tests 1–4).  The full pytest suite
-(test 5) additionally requires **python3 ≥ 3.6** and **pip**
+(test 5) additionally requires **python3 ≥ 3.7** and **pip**
 (`python3 -m pip`).
 
 ---
@@ -16,7 +16,7 @@ Each successful `Build EL RPMs` workflow run uploads three artifact bundles:
 |---|---|---|
 | `wireshark-el8-rpms` | AlmaLinux 8 | RPMs + `install.sh` + `test-install.sh` + `wheels/` + `test/` |
 | `wireshark-el7-rpms` | CentOS 7 (devtoolset-9) | same + `custom-libs.tar.gz` |
-| `wireshark-el6-rpms` | CentOS 6 (devtoolset-7) | same + `custom-libs.tar.gz` |
+| `wireshark-el6-rpms` | CentOS 6 (devtoolset-7) | RPMs + `install.sh` + `test-install.sh` + `test/` + `custom-libs.tar.gz` (no `wheels/`) |
 
 `custom-libs.tar.gz` (EL7/EL6 only) contains the newer runtime libraries that
 the distro ships in too-old a version — `libgcrypt`, `libgpg-error`, `c-ares`,
@@ -91,16 +91,19 @@ The script runs five checks against the **installed** `/usr/bin/tshark` binary:
 
 Tests 1–4 require only `bash` and `tshark`.
 
-Test 5 requires **python3 ≥ 3.6** and **pip**.  It installs `pytest` from the
+Test 5 requires **python3 ≥ 3.7** and **pip**.  It installs `pytest` from the
 bundled `wheels/` directory — completely offline:
 
 ```
 python3 -m pip install --no-index --find-links ./wheels pytest
 ```
 
-On EL6 the system Python 3 is version 3.4, which predates the f-string syntax
-used in the test suite; `test-install.sh` detects this and skips test 5
-automatically (tests 1–4 still run).
+On EL6 the standard Python 3 from SCL (`rh-python36`) is version 3.6, which
+predates `subprocess.run(capture_output=...)` added in Python 3.7; the
+`test-install.sh` detects this and skips test 5 automatically (tests 1–4 still
+run).  Additionally, no `wheels/` directory is bundled in the EL6 artifact; to
+run test 5 on EL6 you must provide both a Python 3.7+ interpreter and a
+`wheels/` directory alongside `test-install.sh`.
 
 ### Expected output
 
@@ -164,5 +167,5 @@ wireshark-el7-rpms/          (or el8 / el6)
 |---|---|---|
 | `error while loading shared libraries: libgcrypt.so.20` | Custom libs not deployed | Re-run `sudo bash install.sh` from the bundle directory |
 | `Failed dependencies: libspeexdsp.so.1` (EL8) | `speexdsp` not installed | Copy `speexdsp` RPM into bundle dir and re-run, or install base package only (see §2) |
-| pytest step skipped | Python < 3.6 or pip absent | Tests 1–4 still validate core functionality |
+| pytest step skipped | Python < 3.7 or pip absent or no `wheels/` dir | Tests 1–4 still validate core functionality |
 | `tshark: command not found` | RPM not installed | Run `sudo bash install.sh` first |
