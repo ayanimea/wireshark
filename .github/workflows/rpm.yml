@@ -666,12 +666,10 @@ jobs:
 
           # pytest 6.2.5: pure Python (py3-none-any), supports Python >= 3.5.
           # Downloaded here in CI so the target machine needs no internet access.
-          # Use --python-version 3.6 so pip resolves environment markers for
-          # the CentOS 7 system python3 version (prevents any cp3x-specific
-          # wheel being pulled in for platform-specific dependencies).
+          # The wheel is version-agnostic (py3-none-any) so --python-version is
+          # not needed; the test-install.sh gate requires Python >= 3.7 anyway.
           mkdir -p rpm-el7/wheels
-          python3 -m pip download --quiet --dest rpm-el7/wheels \
-            --python-version 3.6 "pytest==6.2.5"
+          python3 -m pip download --quiet --dest rpm-el7/wheels "pytest==6.2.5"
 
           # ── install.sh ──────────────────────────────────────────────────────
           cat > rpm-el7/install.sh << 'INSTALL_EL7'
