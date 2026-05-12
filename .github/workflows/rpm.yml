@@ -273,7 +273,7 @@ jobs:
                 --program-path /usr/bin \
                 --disable-capture \
                 --disable-gui \
-                --skip-missing-programs \
+                --skip-missing-programs all \
                 -v --tb=short \
                 "$SCRIPT_DIR/test/suite_dfilter" \
                 "$SCRIPT_DIR/test/suite_dissectors" \
@@ -326,6 +326,7 @@ jobs:
         with:
           name: wireshark-el8-rpms
           path: rpm-el8
+          overwrite: true
 
   # ---------------------------------------------------------------------------
   # Enterprise Linux 7 – CentOS 7
@@ -664,8 +665,12 @@ jobs:
 
           # pytest 6.2.5: pure Python (py3-none-any), supports Python >= 3.5.
           # Downloaded here in CI so the target machine needs no internet access.
+          # Use --python-version 3.6 so pip resolves environment markers for
+          # the CentOS 7 system python3 version (prevents any cp3x-specific
+          # wheel being pulled in for platform-specific dependencies).
           mkdir -p rpm-el7/wheels
-          python3 -m pip download --quiet --dest rpm-el7/wheels "pytest==6.2.5"
+          python3 -m pip download --quiet --dest rpm-el7/wheels \
+            --python-version 3.6 "pytest==6.2.5"
 
           # ── install.sh ──────────────────────────────────────────────────────
           cat > rpm-el7/install.sh << 'INSTALL_EL7'
@@ -754,7 +759,7 @@ jobs:
                 --program-path /usr/bin \
                 --disable-capture \
                 --disable-gui \
-                --skip-missing-programs \
+                --skip-missing-programs all \
                 -v --tb=short \
                 "$SCRIPT_DIR/test/suite_dfilter" \
                 "$SCRIPT_DIR/test/suite_dissectors" \
@@ -798,6 +803,7 @@ jobs:
         with:
           name: wireshark-el7-rpms
           path: rpm-el7
+          overwrite: true
 
   # ---------------------------------------------------------------------------
   # Enterprise Linux 6 – CentOS 6
@@ -1238,11 +1244,10 @@ jobs:
           cp -r test/suite_dfilter test/suite_dissectors \
                 test/captures test/config test/keys rpm-el6/test/
 
-          # pytest 6.2.5 wheels (py3-none-any).  EL6 ships Python 3.4 which
-          # cannot run the suite (f-strings in conftest.py); the test-install.sh
-          # detects this and skips pytest automatically.
-          mkdir -p rpm-el6/wheels
-          python3 -m pip download --quiet --dest rpm-el6/wheels "pytest==6.2.5"
+          # No pytest wheels bundled for EL6: CentOS 6 ships Python 3.4 which is
+          # below pytest's Python >= 3.5 requirement.  test-install.sh detects
+          # this and skips test 5 automatically; the test/ directory is still
+          # included in the bundle in case a newer Python is installed by the user.
 
           # ── install.sh ──────────────────────────────────────────────────────
           cat > rpm-el6/install.sh << 'INSTALL_EL6'
@@ -1313,7 +1318,8 @@ jobs:
 
           # pytest suite — runs against installed binaries via --program-path.
           # Requires python3 >= 3.6 (f-strings in conftest.py) and bundled test/.
-          # Installs pytest from pre-downloaded wheels; no internet or compiler needed.
+          # Note: no wheels/ are bundled for EL6 (CentOS 6 ships Python 3.4 which
+          # is below pytest's >= 3.5 requirement); test 5 will be skipped on stock EL6.
           PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
           PYMAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
           if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 6 ] \
@@ -1331,7 +1337,7 @@ jobs:
                 --program-path /usr/bin \
                 --disable-capture \
                 --disable-gui \
-                --skip-missing-programs \
+                --skip-missing-programs all \
                 -v --tb=short \
                 "$SCRIPT_DIR/test/suite_dfilter" \
                 "$SCRIPT_DIR/test/suite_dissectors" \
@@ -1375,3 +1381,4 @@ jobs:
         with:
           name: wireshark-el6-rpms
           path: rpm-el6
+          overwrite: true

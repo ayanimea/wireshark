@@ -66024,7 +66024,18 @@ value_string_ext enterprise_val_ext = VALUE_STRING_EXT_INIT(enterprise_val);
  *       enterprise_val[] (always correct regardless of ASLR).
  *   (b) Installs enterprise_local_bsearch() as the match function so that
  *       all 64-bit pointer arithmetic stays within our own compiled code
- *       and never passes through glibc's bsearch() or its PLT entry. */
+ *       and never passes through glibc's bsearch() or its PLT entry.
+ *
+ * Trade-off: value_string_ext_validate() (wsutil/value_string.c) accepts
+ * only its own four internal match-function pointers; setting _vs_match2 to
+ * enterprise_local_bsearch causes validate() to return false for this entry
+ * on the affected platform, so 'tshark -G fields' prints a warning and skips
+ * enterprise_val_ext.  Actual packet dissection is unaffected because
+ * validate() is only called from proto_registrar_dump_values().
+ * The built-in alternatives (_try_val_to_str_linear / _try_val_to_str_bsearch)
+ * are static in wsutil/value_string.c and cannot be referenced here;
+ * _try_val_to_str_bsearch calls glibc bsearch() through the PLT and would
+ * reproduce the crash on glibc 2.12. */
 #if defined(__GNUC__) && defined(__linux__) && defined(__x86_64__) && \
     defined(__GLIBC__) && \
     (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17))
