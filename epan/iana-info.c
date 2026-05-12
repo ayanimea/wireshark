@@ -66025,7 +66025,9 @@ value_string_ext enterprise_val_ext = VALUE_STRING_EXT_INIT(enterprise_val);
  *   (b) Installs enterprise_local_bsearch() as the match function so that
  *       all 64-bit pointer arithmetic stays within our own compiled code
  *       and never passes through glibc's bsearch() or its PLT entry. */
-#if defined(__GNUC__)
+#if defined(__GNUC__) && defined(__linux__) && defined(__x86_64__) && \
+    defined(__GLIBC__) && \
+    (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17))
 static const value_string *
 enterprise_local_bsearch(const uint32_t val, value_string_ext *vse _U_)
 {

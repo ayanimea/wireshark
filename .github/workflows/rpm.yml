@@ -54,6 +54,7 @@ jobs:
             flex \
             ninja-build \
             python3 \
+            python3-pip \
             python38 \
             glib2-devel \
             libpcap-devel \
@@ -230,7 +231,7 @@ jobs:
 
           echo ""
           echo "--- 2. Protocol database ---"
-          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || echo 0)
+          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || true)
           [ "$count" -gt 100 ] \
             && ok "$count protocols loaded" || err "protocol DB ($count protocols)"
 
@@ -372,7 +373,8 @@ jobs:
 
               # Install build dependencies.
               # devtoolset-9: GCC 9 with full C++17 support (system GCC 4.8.5 lacks C++17)
-              # cmake3: EPEL7 cmake3 >= 3.26.5 meets Wireshark's cmake >= 3.20 requirement
+              # cmake3: EPEL7 cmake3 is version 3.17.5, below Wireshark's cmake >= 3.20
+              #         requirement; cmake 3.28 is bootstrapped from source below.
               # bzip2: needed for tar -xjf when building libgcrypt from source
               yum install -y \
                 bzip2 git \
@@ -710,7 +712,7 @@ jobs:
 
           echo ""
           echo "--- 2. Protocol database ---"
-          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || echo 0)
+          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || true)
           [ "$count" -gt 100 ] \
             && ok "$count protocols loaded" || err "protocol DB ($count protocols)"
 
@@ -1287,7 +1289,7 @@ jobs:
 
           echo ""
           echo "--- 2. Protocol database ---"
-          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || echo 0)
+          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || true)
           [ "$count" -gt 100 ] \
             && ok "$count protocols loaded" || err "protocol DB ($count protocols)"
 

@@ -2,7 +2,8 @@
 
 This document explains how to install and test Wireshark on a machine that is
 **completely offline** and has **no compiler** — only `rpm`, `bash`, and
-`python3` are required.
+`python3` are required for installation and smoke tests.  The full pytest
+suite (test 5) additionally requires `pip` (`python3 -m pip`).
 
 ---
 

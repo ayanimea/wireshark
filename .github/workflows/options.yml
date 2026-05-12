@@ -1,7 +1,9 @@
 name: CMake Options Test
 
 on:
-  workflow_dispatch:
+  push:
+  schedule:
+    - cron: '1 0 * * *'
 
 jobs:
   options:
