@@ -1043,10 +1043,37 @@ get_external_value_string_ext(const char* name)
 }
 
 
-
 /* MISC */
 
 /* Functions for use by proto_registrar_dump_values(), see proto.c */
+
+/* On Linux x86-64 with glibc < 2.17 (e.g. CentOS 6), epan/iana-info.c
+ * installs a PLT-safe local binary-search function as _vs_match2 for
+ * enterprise_val_ext to work around a dynamic-linker 32-bit truncation bug.
+ * _vs_match2_is_valid() returns true for that custom pointer on the affected
+ * platform, so value_string_ext_validate() still passes for enterprise_val_ext.
+ *
+ * We cannot compare against the exact symbol (enterprise_local_bsearch) because
+ * it is 'static' in epan/iana-info.c and lives in a different shared library;
+ * wsutil cannot take its address.  The minimum safety check — non-NULL and not
+ * the init sentinel — prevents accepting a NULL or uninitialised pointer while
+ * still allowing the one legitimate custom override.
+ *
+ * __GLIBC__ < 2 is omitted from the guard: glibc has been at major version 2
+ * since 1997 and that branch is dead code on any real system. */
+#if defined(__linux__) && defined(__x86_64__) && defined(__GLIBC__) && \
+    (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17)
+static bool
+_vs_match2_is_valid(const value_string_ext *vse)
+{
+    /* Accept any non-NULL, non-init pointer on this platform: the only
+     * legitimate user is the PLT-safe enterprise_local_bsearch installed
+     * by the constructor in epan/iana-info.c.  NULL and the init sentinel
+     * are still rejected as unambiguously invalid. */
+    return (vse->_vs_match2 != NULL &&
+            vse->_vs_match2 != _try_val_to_str_ext_init);
+}
+#endif
 
 bool
 value_string_ext_validate(const value_string_ext *vse)
@@ -1058,16 +1085,10 @@ value_string_ext_validate(const value_string_ext *vse)
         (vse->_vs_match2 != _try_val_to_str_linear)   &&
         (vse->_vs_match2 != _try_val_to_str_bsearch)  &&
         (vse->_vs_match2 != _try_val_to_str_index)) {
-/* On Linux x86-64 with glibc < 2.17 (e.g. CentOS 6), epan/iana-info.c
- * installs a PLT-safe local bsearch as _vs_match2 for enterprise_val_ext to
- * avoid a dynamic-linker truncation bug (see the comment in iana-info.c).
- * Accept a non-NULL, non-init custom match pointer on those platforms so that
- * value_string_ext_validate() still returns true for enterprise_val_ext.
- * NULL is still rejected: a NULL _vs_match2 is never valid. */
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBC__) && \
-    (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17))
-        if (vse->_vs_match2 == NULL || vse->_vs_match2 == _try_val_to_str_ext_init) return false;
-        /* else: non-NULL, non-init custom match function — accept */
+    (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17)
+        if (!_vs_match2_is_valid(vse))
+            return false;
 #else
         return false;
 #endif
@@ -1087,12 +1108,11 @@ value_string_ext_match_type_str(const value_string_ext *vse)
         return "[Binary Search]";
     if (vse->_vs_match2 == _try_val_to_str_index)
         return "[Direct (indexed) Access]";
-/* On Linux x86-64 with glibc < 2.17, a PLT-safe local bsearch may be
- * installed in place of _try_val_to_str_bsearch (see epan/iana-info.c).
- * Accept any non-NULL, non-init pointer as a platform binary-search override. */
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBC__) && \
-    (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17))
-    if (vse->_vs_match2 != NULL && vse->_vs_match2 != _try_val_to_str_ext_init)
+    (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17)
+    /* On old glibc a PLT-safe custom bsearch may be installed (see iana-info.c).
+     * Only report the override label for a genuinely installed custom pointer. */
+    if (_vs_match2_is_valid(vse))
         return "[Binary Search (platform override)]";
 #endif
     return "[Invalid]";

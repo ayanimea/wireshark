@@ -14,8 +14,8 @@ Each successful `Build EL RPMs` workflow run uploads three artifact bundles:
 
 | Artifact | OS | Contents |
 |---|---|---|
-| `wireshark-el8-rpms` | AlmaLinux 8 | RPMs + `install.sh` + `test-install.sh` + `wheels/` + `test/` |
-| `wireshark-el7-rpms` | CentOS 7 (devtoolset-9) | same + `custom-libs.tar.gz` |
+| `wireshark-el8-rpms` | AlmaLinux 8 | RPMs + `install.sh` + `test-install.sh` + `pytest.ini` + `wheels/` + `test/` |
+| `wireshark-el7-rpms` | CentOS 7 (devtoolset-9) | RPMs + `install.sh` + `test-install.sh` + `pytest.ini` + `wheels/` + `test/` + `custom-libs.tar.gz` |
 | `wireshark-el6-rpms` | CentOS 6 (devtoolset-7) | RPMs + `install.sh` + `test-install.sh` + `pytest.ini` + `test/` + `custom-libs.tar.gz` (no `wheels/`) |
 
 `custom-libs.tar.gz` (EL7/EL6 only) contains the newer runtime libraries that
@@ -107,6 +107,10 @@ run test 5 on EL6 you must provide both a Python 3.7+ interpreter and a
 
 ### Expected output
 
+> **Note:** The sample below shows the EL7/EL8 case where all 5 tests run.
+> On EL6, test 5 is automatically skipped (no `wheels/` bundled; Python 3.7+
+> not installed by default), so the summary will show `4 passed, 0 failed`.
+
 ```
 === Wireshark post-install tests ===
 tshark: /usr/bin/tshark
@@ -144,7 +148,7 @@ wireshark-el7-rpms/          (or el8 / el6)
 ├── wireshark-devel-4.x.y-N.el7.x86_64.rpm
 ├── custom-libs.tar.gz       ← EL7/EL6 only; extracted by install.sh
 ├── pytest.ini               ← pytest root config (used by test-install.sh)
-├── wheels/
+├── wheels/                  ← EL7/EL8 only; not bundled for EL6
 │   ├── pytest-6.2.5-py3-none-any.whl
 │   └── <pytest dependencies>-py3-none-any.whl
 └── test/

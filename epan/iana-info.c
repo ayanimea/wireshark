@@ -66035,9 +66035,9 @@ value_string_ext enterprise_val_ext = VALUE_STRING_EXT_INIT(enterprise_val);
  * correctly reports enterprise_val_ext on affected systems.
  * The built-in alternative _try_val_to_str_bsearch calls glibc bsearch()
  * through the PLT and would reproduce the crash on glibc < 2.17. */
+/* __GLIBC__ < 2 is omitted: glibc has been at major version 2 since 1997. */
 #if defined(__GNUC__) && defined(__linux__) && defined(__x86_64__) && \
-    defined(__GLIBC__) && \
-    (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17))
+    defined(__GLIBC__) && (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17)
 static const value_string *
 enterprise_local_bsearch(const uint32_t val, value_string_ext *vse)
 {
@@ -66062,7 +66062,11 @@ enterprise_local_bsearch(const uint32_t val, value_string_ext *vse)
         else
             hi = mid;
     }
-    if (lo < (size_t)(G_N_ELEMENTS(enterprise_val) - 1) && arr[lo].value == val)
+    /* The lower-bound search leaves lo at the first index whose value >= val.
+     * arr[lo].value == val iff the key was found; if lo == N-1 that is the
+     * sentinel {0, NULL} entry and arr[lo].value == val can never be true for
+     * a valid enterprise number (Enterprise numbers are > 0). */
+    if (arr[lo].value == val)
         return &arr[lo];
     return NULL;
 }
@@ -66074,6 +66078,13 @@ enterprise_local_bsearch(const uint32_t val, value_string_ext *vse)
 static void __attribute__((constructor(101)))
 fixup_enterprise_val_ext(void)
 {
+    /* Re-initialise all three fields even though VALUE_STRING_EXT_INIT already
+     * sets _vs_p and _vs_num_entries: the R_X86_64_RELATIVE relocation for
+     * enterprise_val_ext._vs_p may not have been applied correctly by the
+     * glibc < 2.17 dynamic linker (see the comment above), so we load _vs_p
+     * from the PC-relative runtime address here.
+     * G_N_ELEMENTS(enterprise_val) - 1 matches the formula used by
+     * VALUE_STRING_EXT_INIT (which also subtracts the terminating sentinel). */
     enterprise_val_ext._vs_p           = enterprise_val;
     enterprise_val_ext._vs_num_entries = G_N_ELEMENTS(enterprise_val) - 1;
     enterprise_val_ext._vs_match2      = enterprise_local_bsearch;

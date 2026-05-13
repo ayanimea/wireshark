@@ -19,6 +19,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+/* Explicitly include errno.h for AlmaLinux 8 strict-mode builds where
+ * GCC does not implicitly expose errno constants via other system headers. */
 #include <errno.h>
 #include <epan/packet.h>
 #include <epan/packet_info.h>
