@@ -1066,8 +1066,7 @@ value_string_ext_validate(const value_string_ext *vse)
  * NULL is still rejected: a NULL _vs_match2 is never valid. */
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBC__) && \
     (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17))
-        if (vse->_vs_match2 == NULL) return false;
-        if (vse->_vs_match2 == _try_val_to_str_ext_init) return false;
+        if (vse->_vs_match2 == NULL || vse->_vs_match2 == _try_val_to_str_ext_init) return false;
         /* else: non-NULL, non-init custom match function — accept */
 #else
         return false;
