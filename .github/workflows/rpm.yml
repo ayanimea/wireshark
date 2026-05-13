@@ -18,7 +18,18 @@ name: Build EL RPMs
 #                     Build uses SCL devtoolset-7 (GCC 7, C++17).
 #                     CentOS 6 reached EOL November 2020; vault repos are used.
 
-on: [push]
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'feature-rpm-*'
+      - 'copilot/*'
+    paths:
+      - '.github/workflows/rpm.yml'
+      - 'epan/**'
+      - 'wsutil/**'
+      - 'packaging/rpm/**'
+      - 'CMakeLists.txt'
 
 jobs:
 
@@ -144,12 +155,11 @@ jobs:
           # fail with TypeError under Python 3.6.
           python3.8 -m venv /tmp/pytest-env
           /tmp/pytest-env/bin/pip install --quiet pytest pytest-xdist
-          # Pass the binary directory via WS_BIN_PATH instead of --program-path.
-          # --program-path is a custom option registered by test/conftest.py; in
-          # some pytest versions conftest.py is not loaded early enough for
-          # custom options to be available during argument parsing, causing
-          # "unrecognized arguments" errors.  WS_BIN_PATH is an environment
-          # variable fallback that conftest.py checks unconditionally.
+          # Pass the binary directory via WS_BIN_PATH (an env var read by
+          # test/conftest.py) rather than --program-path (a custom CLI option
+          # that conftest.py registers).  Both work; WS_BIN_PATH is the
+          # recommended way to point the test suite at an installed binary
+          # without modifying the pytest invocation.
           export WS_BIN_PATH="$PWD/build/run"
           export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
           /tmp/pytest-env/bin/pytest \
@@ -268,7 +278,7 @@ jobs:
             python3 -m pip install --quiet --no-index \
               --find-links "$SCRIPT_DIR/wheels" pytest \
               && pytest_ok=1 \
-              || echo "  WARN: could not install pytest; skipping suite"
+              || err "pytest suite (pip install failed)"
             if [ "$pytest_ok" -eq 1 ]; then
               WS_BIN_PATH=/usr/bin python3 -m pytest \
                 --rootdir "$SCRIPT_DIR" \
@@ -298,7 +308,7 @@ jobs:
         run: |
           echo "=== RPMs produced ==="
           ls -lh rpm-el8/
-          rpm_count=$(ls rpm-el8/*.rpm | wc -l)
+          rpm_count=$(ls rpm-el8/*.rpm 2>/dev/null | wc -l)
           [ "$rpm_count" -gt 0 ] || { echo "FAIL: no RPMs produced"; exit 1; }
           echo "PASS: $rpm_count RPM(s) found"
           for rpm in rpm-el8/*.rpm; do
@@ -756,7 +766,7 @@ jobs:
             python3 -m pip install --quiet --no-index \
               --find-links "$SCRIPT_DIR/wheels" pytest \
               && pytest_ok=1 \
-              || echo "  WARN: could not install pytest; skipping suite"
+              || err "pytest suite (pip install failed)"
             if [ "$pytest_ok" -eq 1 ]; then
               WS_BIN_PATH=/usr/bin python3 -m pytest \
                 --rootdir "$SCRIPT_DIR" \
@@ -1179,10 +1189,14 @@ jobs:
               # path ensures the GCC 7 runtime (libstdc++, libgcc_s) is available.
               export LD_LIBRARY_PATH=/usr/local/lib:/opt/rh/devtoolset-7/root/usr/lib64
               # Show which glib2 and libxml2 tshark resolves at runtime.
+              # '|| true' is intentional: under 'set -o pipefail', a SIGPIPE or
+              # grep non-match would otherwise abort the script; this line is
+              # diagnostic-only and should never block the build.
               ldd build/run/tshark 2>/dev/null | grep -E "libglib|libxml2|libc\." || true
-              # Disable glib2 slice allocator to avoid potential slab-heap mismatch
-              # between our custom glib2 2.54 and the CentOS 6 glibc 2.12 allocator.
-              if G_SLICE=always-malloc build/run/tshark --version; then
+              # enterprise_local_bsearch (installed by the constructor in
+              # epan/iana-info.c) fixes the PLT 32-bit truncation bug on
+              # glibc < 2.17; G_SLICE=always-malloc is no longer needed.
+              if build/run/tshark --version; then
                 echo "PASS: tshark --version"
               else
                 echo "FAIL: tshark --version; collecting gdb backtrace for diagnostics"
@@ -1201,10 +1215,10 @@ jobs:
                   --args build/run/tshark --version 2>&1 || true
                 exit 1
               fi
-              G_SLICE=always-malloc WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 \
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 \
                 build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
                 && echo "PASS: tshark reads arp.pcap"
-              G_SLICE=always-malloc WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 \
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 \
                 build/run/tshark -G protocols 2>/dev/null | grep -qi "^tcp" \
                 && echo "PASS: protocol database loads"
               # -----------------------------------------------------------
@@ -1340,7 +1354,7 @@ jobs:
             python3 -m pip install --quiet --no-index \
               --find-links "$SCRIPT_DIR/wheels" pytest \
               && pytest_ok=1 \
-              || echo "  WARN: could not install pytest; skipping suite"
+              || err "pytest suite (pip install failed)"
             if [ "$pytest_ok" -eq 1 ]; then
               WS_BIN_PATH=/usr/bin python3 -m pytest \
                 --rootdir "$SCRIPT_DIR" \
