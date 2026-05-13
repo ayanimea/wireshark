@@ -16,7 +16,7 @@ Each successful `Build EL RPMs` workflow run uploads three artifact bundles:
 |---|---|---|
 | `wireshark-el8-rpms` | AlmaLinux 8 | RPMs + `install.sh` + `test-install.sh` + `wheels/` + `test/` |
 | `wireshark-el7-rpms` | CentOS 7 (devtoolset-9) | same + `custom-libs.tar.gz` |
-| `wireshark-el6-rpms` | CentOS 6 (devtoolset-7) | RPMs + `install.sh` + `test-install.sh` + `test/` + `custom-libs.tar.gz` (no `wheels/`) |
+| `wireshark-el6-rpms` | CentOS 6 (devtoolset-7) | RPMs + `install.sh` + `test-install.sh` + `pytest.ini` + `test/` + `custom-libs.tar.gz` (no `wheels/`) |
 
 `custom-libs.tar.gz` (EL7/EL6 only) contains the newer runtime libraries that
 the distro ships in too-old a version — `libgcrypt`, `libgpg-error`, `c-ares`,

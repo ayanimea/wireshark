@@ -254,7 +254,7 @@ jobs:
           "$TSHARK" -r "$TMP/t.pcap" -Y "arp.opcode == 1" -c 1 -q 2>/dev/null \
             && ok "display filter (arp.opcode == 1)" || err "display filter"
 
-          # pytest suite — runs against installed binaries via --program-path.
+          # pytest suite — runs against installed binaries via WS_BIN_PATH.
           # Requires python3 >= 3.7 (subprocess.run(capture_output=) in subprocesstest.py)
           # and bundled test/. Installs pytest from pre-downloaded wheels; no internet needed.
           PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
@@ -264,14 +264,15 @@ jobs:
               && python3 -m pip --version >/dev/null 2>&1; then
             echo ""
             echo "--- 5. pytest suite (Python $PYMAJOR.$PYMINOR) ---"
+            pytest_ok=0
             python3 -m pip install --quiet --no-index \
               --find-links "$SCRIPT_DIR/wheels" pytest \
-              || { echo "  WARN: could not install pytest; skipping suite"; PYMINOR=0; }
-            if [ "$PYMINOR" -ge 7 ]; then
-              python3 -m pytest \
+              && pytest_ok=1 \
+              || echo "  WARN: could not install pytest; skipping suite"
+            if [ "$pytest_ok" -eq 1 ]; then
+              WS_BIN_PATH=/usr/bin python3 -m pytest \
                 --rootdir "$SCRIPT_DIR" \
                 --override-ini="addopts=-ra" \
-                --program-path /usr/bin \
                 --disable-capture \
                 --disable-gui \
                 --skip-missing-programs all \
@@ -356,6 +357,7 @@ jobs:
             -v "$PWD:/workspace:z" \
             -w /workspace \
             centos:7 bash -ex <<'EL7_BUILD'
+              set -o pipefail
               # Fix CentOS 7 repos to use vault over HTTPS (EOL June 2024)
               sed -i "s/mirrorlist/#mirrorlist/g" /etc/yum.repos.d/CentOS-*.repo
               sed -i "s|#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" \
@@ -411,7 +413,8 @@ jobs:
               make install
               # Register /usr/local/lib in the dynamic linker so the shared
               # library is found during the libgcrypt configure link test.
-              echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
+              grep -qx '/usr/local/lib' /etc/ld.so.conf.d/local.conf 2>/dev/null \
+                || echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
               ldconfig
               # libgpg-error >= 1.33 ships gpgrt-config instead of the old
               # gpg-error-config.  libgcrypt 1.8.x configure still calls
@@ -739,7 +742,7 @@ jobs:
           "$TSHARK" -r "$TMP/t.pcap" -Y "arp.opcode == 1" -c 1 -q 2>/dev/null \
             && ok "display filter (arp.opcode == 1)" || err "display filter"
 
-          # pytest suite — runs against installed binaries via --program-path.
+          # pytest suite — runs against installed binaries via WS_BIN_PATH.
           # Requires python3 >= 3.7 (subprocess.run(capture_output=) in subprocesstest.py)
           # and bundled test/. Installs pytest from pre-downloaded wheels; no internet needed.
           PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
@@ -749,14 +752,15 @@ jobs:
               && python3 -m pip --version >/dev/null 2>&1; then
             echo ""
             echo "--- 5. pytest suite (Python $PYMAJOR.$PYMINOR) ---"
+            pytest_ok=0
             python3 -m pip install --quiet --no-index \
               --find-links "$SCRIPT_DIR/wheels" pytest \
-              || { echo "  WARN: could not install pytest; skipping suite"; PYMINOR=0; }
-            if [ "$PYMINOR" -ge 7 ]; then
-              python3 -m pytest \
+              && pytest_ok=1 \
+              || echo "  WARN: could not install pytest; skipping suite"
+            if [ "$pytest_ok" -eq 1 ]; then
+              WS_BIN_PATH=/usr/bin python3 -m pytest \
                 --rootdir "$SCRIPT_DIR" \
                 --override-ini="addopts=-ra" \
-                --program-path /usr/bin \
                 --disable-capture \
                 --disable-gui \
                 --skip-missing-programs all \
@@ -844,6 +848,7 @@ jobs:
             -v "$PWD:/workspace:z" \
             -w /workspace \
             centos:6 bash -ex <<'EL6_BUILD'
+              set -o pipefail
               # Fix CentOS 6 repos to use vault over HTTPS (EOL November 2020)
               sed -i "s/mirrorlist/#mirrorlist/g" /etc/yum.repos.d/CentOS-*.repo
               sed -i "s|#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=https://vault.centos.org/centos/6|g" \
@@ -895,8 +900,10 @@ jobs:
               # Register devtoolset-7 runtime libs in ldconfig so that binaries
               # compiled with it can run even when it is not explicitly sourced
               # (e.g. when rpmbuild invokes cmake without sourcing devtoolset-7).
-              echo /opt/rh/devtoolset-7/root/usr/lib64 >> /etc/ld.so.conf.d/devtoolset-7.conf
-              echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
+              grep -qx '/opt/rh/devtoolset-7/root/usr/lib64' /etc/ld.so.conf.d/devtoolset-7.conf 2>/dev/null \
+                || echo /opt/rh/devtoolset-7/root/usr/lib64 >> /etc/ld.so.conf.d/devtoolset-7.conf
+              grep -qx '/usr/local/lib' /etc/ld.so.conf.d/local.conf 2>/dev/null \
+                || echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
               ldconfig
 
               # Ensure /usr/local/bin is on PATH so our cmake3/gcc/g++ symlinks are
@@ -1012,12 +1019,10 @@ jobs:
               # Expose devtoolset-7 gcc/g++ on PATH for cmake compiler auto-detection.
               ln -sf /opt/rh/devtoolset-7/root/usr/bin/gcc /usr/local/bin/gcc
               ln -sf /opt/rh/devtoolset-7/root/usr/bin/g++ /usr/local/bin/g++
-              # Use GNU gold linker: gold orders .rela.dyn entries differently
-              # from bfd, which may avoid the glibc 2.12 dynamic-linker relocation
-              # issue that causes tshark to crash in try_val_to_str_ext when it
-              # accesses enterprise_val_ext for val=5535.  Gold is shipped as
-              # /opt/rh/devtoolset-7/root/usr/bin/ld.gold with devtoolset-7-binutils;
-              # -fuse-ld=gold in cmake linker flags tells devtoolset-7 GCC to use it.
+              # Note: the glibc 2.12 bsearch 32-bit truncation bug that used to
+              # require -O0 or -fuse-ld=gold is now handled entirely by
+              # enterprise_local_bsearch() in epan/iana-info.c; no linker or
+              # optimisation-flag workaround is needed here.
 
               # Export PKG_CONFIG_PATH so cmake finds all /usr/local-installed
               # packages before the older system versions.
@@ -1058,8 +1063,6 @@ jobs:
                 -DHAVE_LINUX_IF_BONDING_H=0 \
                 -DHAVE_LINUX_SOCKIOS_H=0 \
                 "-DCMAKE_C_FLAGS=-Dstatic_assert=_Static_assert" \
-                "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG" \
-                "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG" \
                 "-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64" \
                 -DCMAKE_PREFIX_PATH=/usr/local
 
@@ -1087,10 +1090,9 @@ jobs:
               # Add custom cmake flags to rpmbuild's cmake invocation so it finds
               # /usr/local libraries and matches the same compile-time flags used in
               # the pre-packaging build above (static_assert mapping, header guards,
-              # RPATH so glib2 2.54 is found at link/run time inside rpmbuild,
-              # and -O0 to prevent GCC 7 miscompilation of the large enterprise SNMP
-              # OID table in iana-info.c; the glibc 2.12 bsearch 32-bit truncation
-              # is handled by enterprise_local_bsearch() in iana-info.c itself).
+              # and RPATH so glib2 2.54 is found at link/run time inside rpmbuild).
+              # The glibc 2.12 bsearch 32-bit truncation is handled by
+              # enterprise_local_bsearch() in iana-info.c; no -O0 override needed.
               awk '/^%cmake \\$/ {
                 print
                 print "  -DCMAKE_PREFIX_PATH=/usr/local \\"
@@ -1098,8 +1100,6 @@ jobs:
                 print "  -DHAVE_LINUX_SOCKIOS_H=0 \\"
                 print "  -DBUILD_sharkd=OFF \\"
                 print "  \"-DCMAKE_C_FLAGS=-Dstatic_assert=_Static_assert\" \\"
-                print "  \"-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG\" \\"
-                print "  \"-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O0 -g -DNDEBUG\" \\"
                 print "  \"-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64\" \\"
                 next
               }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
@@ -1132,7 +1132,10 @@ jobs:
               # Without support, RPM treats the argument as a filename and reports
               # "File must begin with /" because "COPYING" / "GPL-2.0-or-later"
               # are not absolute paths.  Replace with %doc which RPM 4.8 understands.
-              sed -i 's|^%license |%doc |' "$SPEC"
+              # Use an ERE pattern to match any whitespace after %license (including
+              # tabs and trailing-only occurrences) so future spec changes don't
+              # silently slip through.
+              sed -i -E 's/^%license([[:space:]]+)/%doc\1/' "$SPEC"
               # Remove the %exclude glob for the wireshark GUI binary.
               # Qt5 is unavailable on CentOS 6, so the wireshark binary is not built
               # and not installed.  On RPM 4.8 (EL6) an unmatched glob in a %files
@@ -1157,8 +1160,10 @@ jobs:
               # which supports f-strings, but the subprocesstest.py suite uses
               # subprocess.run(capture_output=True) added in Python 3.7, causing
               # TypeError in every dissector and dfilter test.
+              # text2pcap is built for consistency with EL7/EL8 (several pytest
+              # dissector tests use it to construct synthetic captures).
               # -----------------------------------------------------------
-              cmake3 --build build --target tshark --target test-programs --target dftest
+              cmake3 --build build --target tshark --target test-programs --target dftest --target text2pcap
 
               # C unit tests (direct binary execution, no pytest needed).
               export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
@@ -1317,7 +1322,7 @@ jobs:
           "$TSHARK" -r "$TMP/t.pcap" -Y "arp.opcode == 1" -c 1 -q 2>/dev/null \
             && ok "display filter (arp.opcode == 1)" || err "display filter"
 
-          # pytest suite — runs against installed binaries via --program-path.
+          # pytest suite — runs against installed binaries via WS_BIN_PATH.
           # Requires python3 >= 3.7 (subprocess.run(capture_output=) in subprocesstest.py),
           # a bundled wheels/ directory, and bundled test/.
           # Note: no wheels/ are bundled for EL6 (stock CentOS 6 ships Python 3.4 which
@@ -1331,14 +1336,15 @@ jobs:
               && python3 -m pip --version >/dev/null 2>&1; then
             echo ""
             echo "--- 5. pytest suite (Python $PYMAJOR.$PYMINOR) ---"
+            pytest_ok=0
             python3 -m pip install --quiet --no-index \
               --find-links "$SCRIPT_DIR/wheels" pytest \
-              || { echo "  WARN: could not install pytest; skipping suite"; PYMINOR=0; }
-            if [ "$PYMINOR" -ge 7 ]; then
-              python3 -m pytest \
+              && pytest_ok=1 \
+              || echo "  WARN: could not install pytest; skipping suite"
+            if [ "$pytest_ok" -eq 1 ]; then
+              WS_BIN_PATH=/usr/bin python3 -m pytest \
                 --rootdir "$SCRIPT_DIR" \
                 --override-ini="addopts=-ra" \
-                --program-path /usr/bin \
                 --disable-capture \
                 --disable-gui \
                 --skip-missing-programs all \

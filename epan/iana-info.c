@@ -66039,8 +66039,11 @@ value_string_ext enterprise_val_ext = VALUE_STRING_EXT_INIT(enterprise_val);
     defined(__GLIBC__) && \
     (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17))
 static const value_string *
-enterprise_local_bsearch(const uint32_t val, value_string_ext *vse _U_)
+enterprise_local_bsearch(const uint32_t val, value_string_ext *vse)
 {
+    /* This function is only ever installed for enterprise_val_ext. */
+    ws_assert(vse == &enterprise_val_ext);
+
     /* Load the enterprise_val base address via a PC-relative instruction.
      * This is always the correct runtime address regardless of ASLR and
      * requires no external library call. */
@@ -66064,7 +66067,11 @@ enterprise_local_bsearch(const uint32_t val, value_string_ext *vse _U_)
     return NULL;
 }
 
-static void __attribute__((constructor))
+/* Use constructor priority 101 (user-defined priorities must be > 100).
+ * This ensures fixup_enterprise_val_ext runs before any default-priority
+ * constructor that might call enterprises_lookup() and trigger the old,
+ * unfixed _vs_match2 = _try_val_to_str_ext_init initialisation path. */
+static void __attribute__((constructor(101)))
 fixup_enterprise_val_ext(void)
 {
     enterprise_val_ext._vs_p           = enterprise_val;
