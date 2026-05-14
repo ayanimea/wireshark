@@ -21,7 +21,7 @@ class WSRepoFileInlineMacro < Extensions::InlineMacroProcessor
 
   def process(parent, repopath, attrs)
     if repopath[0] == '/'
-        repopath = repopath[1..]
+        repopath = repopath[1..-1]
     end
     target = %(https://gitlab.com/wireshark/wireshark/-/raw/master/#{repopath})
     repotext = !attrs['text'].nil_or_empty? ? attrs['text'] : repopath
@@ -47,7 +47,7 @@ class WSRepoDirInlineMacro < Extensions::InlineMacroProcessor
 
   def process(parent, repopath, attrs)
     if repopath[0] == '/'
-        repopath = repopath[1..]
+        repopath = repopath[1..-1]
     end
     target = %(https://gitlab.com/wireshark/wireshark/tree/master/#{repopath})
     repotext = !attrs['text'].nil_or_empty? ? attrs['text'] : repopath

@@ -66010,6 +66010,87 @@ static const value_string enterprise_val[] = {
 
 value_string_ext enterprise_val_ext = VALUE_STRING_EXT_INIT(enterprise_val);
 
+/* On Linux x86-64 with glibc < 2.17 (e.g. CentOS 6 / glibc 2.12) the dynamic
+ * linker correctly applies most R_X86_64_RELATIVE relocations in
+ * libwireshark.so, but the very large .rela.dyn section (caused by the
+ * ~65 000 string-pointer entries in enterprise_val[]) triggers a path in the
+ * dynamic linker where the return value of glibc's bsearch() has its upper
+ * 32 bits zeroed.  This produces a non-mapped address in the local variable
+ * `vs' inside try_val_to_str_ext() and a SIGSEGV when the caller reads
+ * vs->strptr.  The guard uses < 2.17 (not == 2.12) because glibc 2.17 was
+ * the first release (shipping in CentOS 7) that rewrote the dynamic linker's
+ * relocation processing and eliminated this failure mode; intermediate
+ * versions 2.13-2.16 on other distributions may be equally affected.
+ *
+ * This constructor function runs when the library is loaded, before any
+ * call to enterprises_lookup().  It:
+ *   (a) Re-initialises _vs_p from the PC-relative runtime address of
+ *       enterprise_val[] (always correct regardless of ASLR).
+ *   (b) Installs enterprise_local_bsearch() as the match function so that
+ *       all 64-bit pointer arithmetic stays within our own compiled code
+ *       and never passes through glibc's bsearch() or its PLT entry.
+ *
+ * value_string_ext_validate() in wsutil/value_string.c is extended with the
+ * same platform guard to accept this custom pointer, so 'tshark -G fields'
+ * correctly reports enterprise_val_ext on affected systems.
+ * The built-in alternative _try_val_to_str_bsearch calls glibc bsearch()
+ * through the PLT and would reproduce the crash on glibc < 2.17. */
+/* __GLIBC__ < 2 is omitted: glibc has been at major version 2 since 1997. */
+#if defined(__GNUC__) && defined(__linux__) && defined(__x86_64__) && \
+    defined(__GLIBC__) && (__GLIBC__ == 2 && __GLIBC_MINOR__ < 17)
+static const value_string *
+enterprise_local_bsearch(const uint32_t val, value_string_ext *vse)
+{
+    /* This function is only ever installed for enterprise_val_ext. */
+    ws_assert(vse == &enterprise_val_ext);
+
+    /* Load the enterprise_val base address via a PC-relative instruction.
+     * This is always the correct runtime address regardless of ASLR and
+     * requires no external library call. */
+    const value_string * const arr = enterprise_val;
+    size_t lo = 0;
+    /* Exclude the terminating {0, NULL} sentinel from the search range. */
+    size_t hi = (size_t)(G_N_ELEMENTS(enterprise_val) - 1);
+
+    /* Standard binary search.  All arithmetic operates on the local `arr'
+     * pointer (PC-relative) and size_t indices, so no external library
+     * function is involved and 64-bit pointer integrity is guaranteed. */
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (arr[mid].value < val)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    /* The lower-bound search leaves lo at the first index whose value >= val.
+     * arr[lo].value == val iff the key was found; if lo == N-1 that is the
+     * sentinel {0, NULL} entry and arr[lo].value == val can never be true for
+     * a valid enterprise number (Enterprise numbers are > 0). */
+    if (arr[lo].value == val)
+        return &arr[lo];
+    return NULL;
+}
+
+/* Use constructor priority 101 (user-defined priorities must be > 100).
+ * This ensures fixup_enterprise_val_ext runs before any default-priority
+ * constructor that might call enterprises_lookup() and trigger the old,
+ * unfixed _vs_match2 = _try_val_to_str_ext_init initialisation path. */
+static void __attribute__((constructor(101)))
+fixup_enterprise_val_ext(void)
+{
+    /* Re-initialise all three fields even though VALUE_STRING_EXT_INIT already
+     * sets _vs_p and _vs_num_entries: the R_X86_64_RELATIVE relocation for
+     * enterprise_val_ext._vs_p may not have been applied correctly by the
+     * glibc < 2.17 dynamic linker (see the comment above), so we load _vs_p
+     * from the PC-relative runtime address here.
+     * G_N_ELEMENTS(enterprise_val) - 1 matches the formula used by
+     * VALUE_STRING_EXT_INIT (which also subtracts the terminating sentinel). */
+    enterprise_val_ext._vs_p           = enterprise_val;
+    enterprise_val_ext._vs_num_entries = G_N_ELEMENTS(enterprise_val) - 1;
+    enterprise_val_ext._vs_match2      = enterprise_local_bsearch;
+}
+#endif
+
 
 static const ws_services_entry_t global_tcp_udp_services_table[] = {
 	{ 1,        "tcpmux",           "TCP Port Service Multiplexer"},

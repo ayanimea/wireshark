@@ -1,0 +1,1408 @@
+name: Build EL RPMs
+
+# Build Wireshark RPM packages for Enterprise Linux 6, 7, and 8.
+#
+# EL8 (AlmaLinux 8):  Fully supported. Uses EPEL + CRB (CodeReady Builder,
+#                     formerly "PowerTools" in AlmaLinux < 8.6) repos.
+# EL7 (CentOS 7):     Supported. ubuntu-latest runner + docker run centos:7
+#                     is used because CentOS 7 (glibc 2.17) is incompatible
+#                     with the Node.js 24 runtime required by actions/checkout.
+#                     Build uses EPEL + SCL devtoolset-9 (GCC 9, C++17).
+#                     CentOS 7 reached EOL June 30, 2024; vault repos are used.
+# EL6 (CentOS 6):     Supported. ubuntu-latest runner + docker run centos:6
+#                     is used because CentOS 6 (glibc 2.12) is incompatible
+#                     with the Node.js 24 runtime required by actions/checkout.
+#                     Several dependencies are too old in CentOS 6 / EPEL 6 and
+#                     are built from source: cmake 3.28 (via bootstrap), glib2,
+#                     pcre2, libxml2, libgpg-error, libgcrypt, c-ares.
+#                     Build uses SCL devtoolset-7 (GCC 7, C++17).
+#                     CentOS 6 reached EOL November 2020; vault repos are used.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'feature-rpm-*'
+      - 'copilot/*'
+    paths:
+      - '.github/workflows/rpm.yml'
+      - 'epan/**'
+      - 'wsutil/**'
+      - 'packaging/rpm/**'
+      - 'CMakeLists.txt'
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # Enterprise Linux 8 – AlmaLinux 8
+  # ---------------------------------------------------------------------------
+  el8:
+    name: Build EL8 RPMs
+    runs-on: ubuntu-latest
+    container: almalinux:8
+    steps:
+      - name: Install git
+        run: dnf install -y git
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Enable EPEL and CRB repositories
+        run: |
+          dnf install -y epel-release
+          # Enable CodeReady Builder (CRB).  AlmaLinux < 8.6 called it
+          # "powertools"; 8.6+ renamed it to "crb".  The /usr/bin/crb helper
+          # shipped with epel-release handles both names automatically.
+          /usr/bin/crb enable
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            cmake \
+            gcc gcc-c++ \
+            flex \
+            ninja-build \
+            python3 \
+            python3-pip \
+            python38 \
+            glib2-devel \
+            libpcap-devel \
+            zlib-devel \
+            libgcrypt-devel \
+            pcre2-devel \
+            c-ares-devel \
+            speexdsp-devel \
+            libxml2-devel \
+            libcap-devel \
+            krb5-devel \
+            lz4-devel \
+            snappy-devel \
+            libmaxminddb-devel \
+            gnutls-devel \
+            brotli-devel \
+            libzstd-devel \
+            opus-devel \
+            qt5-qtbase-devel \
+            qt5-qtmultimedia-devel \
+            qt5-linguist \
+            desktop-file-utils \
+            hicolor-icon-theme \
+            rpm-build \
+            rubygem-asciidoctor
+
+      - name: Set release version
+        run: python3 tools/make-version.py --set-release .
+
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory '*'
+
+      - name: Configure build
+        run: |
+          cmake -S . -B build -GNinja \
+            -DBUILD_wireshark=ON \
+            -DUSE_qt6=OFF \
+            -DENABLE_WERROR=OFF
+
+      # Build tshark, all C unit-test programs, plus dftest and text2pcap
+      # (required by pytest suite_dfilter and suite_dissectors).
+      # Building the Qt GUI (wireshark) is deferred to rpmbuild.
+      - name: Build Wireshark binaries and test programs
+        run: cmake --build build --target tshark --target test-programs --target dftest --target text2pcap
+
+      # Run every compiled C unit-test program individually so a single failure
+      # produces a clear "FAIL: <program>" message and stops the job.
+      - name: Run Wireshark C unit tests
+        run: |
+          export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+          for prog in exntest fifo_string_cache_test oids_test reassemble_test \
+                      tvbtest wmem_test wscbor_test wscbor_enc_test \
+                      test_epan test_wsutil; do
+            echo "=== $prog ==="
+            build/run/$prog && echo "PASS: $prog" || { echo "FAIL: $prog"; exit 1; }
+          done
+
+      # Run tshark directly to verify the binary links and the dissector database
+      # loads correctly in the cmake build tree.
+      - name: Run tshark functional smoke tests
+        run: |
+          export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+          echo "--- tshark --version ---"
+          build/run/tshark --version
+          echo "--- read arp.pcap ---"
+          build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
+            && echo "PASS: tshark reads arp.pcap"
+          echo "--- display filter ---"
+          build/run/tshark -r test/captures/http.pcap -Y "http" -c 1 -q 2>/dev/null \
+            && echo "PASS: display filter works"
+          echo "--- protocol database ---"
+          build/run/tshark -G protocols 2>/dev/null | grep -qi "^tcp" \
+            && echo "PASS: protocol database loads"
+
+      # Run the pytest-based suites that do not require capture privileges or a
+      # display: unit tests, display-filter engine, and dissector tests.
+      # Use pip to install pytest so we get a modern release (>= 6.0) that
+      # supports --override-ini and Wireshark's conftest.py options.
+      # AlmaLinux 8 AppStream ships pytest 3.4.2 which predates --override-ini
+      # (added in pytest 4.1), so we skip the dnf route entirely.
+      - name: Run Wireshark pytest suite
+        run: |
+          # Use Python 3.8 (python38 from AppStream) for the venv: AlmaLinux 8's
+          # default python3 is 3.6, which predates subprocess.run(capture_output=)
+          # added in Python 3.7.  Wireshark's test/subprocesstest.py passes
+          # capture_output=True to subprocess.run(), so all dfilter/dissector tests
+          # fail with TypeError under Python 3.6.
+          python3.8 -m venv /tmp/pytest-env
+          /tmp/pytest-env/bin/pip install --quiet pytest pytest-xdist
+          # Pass the binary directory via WS_BIN_PATH (an env var read by
+          # test/conftest.py) rather than --program-path (a custom CLI option
+          # that conftest.py registers).  Both work; WS_BIN_PATH is the
+          # recommended way to point the test suite at an installed binary
+          # without modifying the pytest invocation.
+          export WS_BIN_PATH="$PWD/build/run"
+          export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+          /tmp/pytest-env/bin/pytest \
+            -ra -v --tb=short \
+            --deselect test/suite_dfilter/group_syntax.py::TestDfilterSyntax::test_exists_5 \
+            test/suite_unittests.py \
+            test/suite_dfilter \
+            test/suite_dissectors
+
+      - name: Build source tarball
+        run: cmake --build build --target dist
+
+      - name: Build RPMs
+        run: cmake --build build --target wireshark_rpm
+
+      - name: Collect RPMs
+        run: |
+          mkdir rpm-el8
+          find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el8/ \;
+
+      # ─── Offline deployment bundle ───────────────────────────────────────────
+      # Produces a self-contained directory that can be copied to a fully offline
+      # machine (no internet, no compiler) and installed with two commands:
+      #   sudo bash install.sh   →  installs RPMs + any bundled runtime libs
+      #   bash test-install.sh   →  runs tshark smoke tests + pytest suite
+      - name: Bundle EL8 offline installer
+        run: |
+          # Test suites that work against an installed binary (no build tree needed).
+          mkdir -p rpm-el8/test
+          cp pytest.ini rpm-el8/
+          cp test/conftest.py test/matchers.py test/subprocesstest.py rpm-el8/test/
+          cp test/suite_clopts.py rpm-el8/test/
+          cp -r test/suite_dfilter test/suite_dissectors \
+                test/captures test/config test/keys rpm-el8/test/
+
+          # pytest 6.x wheels: pure Python (py3-none-any), no compiler needed.
+          # pytest 6.2.5 supports Python >= 3.5, covers every EL8 Python version.
+          mkdir -p rpm-el8/wheels
+          python3 -m pip download --quiet --dest rpm-el8/wheels "pytest==6.2.5"
+
+          # ── install.sh ──────────────────────────────────────────────────────
+          cat > rpm-el8/install.sh << 'INSTALL_EL8'
+          #!/usr/bin/env bash
+          # Wireshark EL8 offline installer.  Must run as root.
+          set -euo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          echo "=== Installing Wireshark (EL 8) ==="
+          echo "--- Installing Wireshark RPMs ---"
+          # rpm -Uvh resolves cross-package deps within the bundle.
+          # All required shared libraries must be present on the target system
+          # (base OS provides glib2, libpcap, gnutls, etc.; custom-libs.tar.gz
+          # provides everything else for EL7/EL6; see OFFLINE-INSTALL.md).
+          rpm -Uvh "$SCRIPT_DIR"/wireshark*.rpm
+          echo ""
+          echo "=== Done.  Verify with: tshark --version ==="
+          INSTALL_EL8
+          chmod +x rpm-el8/install.sh
+
+          # ── test-install.sh ─────────────────────────────────────────────────
+          cat > rpm-el8/test-install.sh << 'TEST_SCRIPT'
+          #!/usr/bin/env bash
+          # Wireshark post-install functional tests.
+          # python3 >= 3.7 is required for the pytest suite (subprocess.run(capture_output=)
+          # was added in 3.7); no compiler or internet needed.
+          set -uo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          TSHARK=${TSHARK:-$(command -v tshark 2>/dev/null || echo /usr/bin/tshark)}
+          pass=0; fail=0
+          ok()  { echo "  PASS: $*"; pass=$((pass+1)); }
+          err() { echo "  FAIL: $*"; fail=$((fail+1)); }
+
+          echo "=== Wireshark post-install tests ==="
+          echo "tshark: $TSHARK"
+
+          echo ""
+          echo "--- 1. tshark --version ---"
+          "$TSHARK" --version 2>&1 | head -1
+          "$TSHARK" --version 2>&1 | grep -qi "TShark" \
+            && ok "tshark --version" || err "tshark --version"
+
+          echo ""
+          echo "--- 2. Protocol database ---"
+          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || true)
+          [ "$count" -gt 100 ] \
+            && ok "$count protocols loaded" || err "protocol DB ($count protocols)"
+
+          echo ""
+          echo "--- 3. ARP packet dissection ---"
+          TMP=$(mktemp -d)
+          cleanup() { rm -rf "$TMP"; }
+          trap cleanup EXIT
+          # Minimal pcap: global header (24 B) + record header (16 B) + ARP request (42 B).
+          printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' > "$TMP/t.pcap"
+          printf '\x00\x00\x00\x00\x00\x00\x00\x00\x2a\x00\x00\x00\x2a\x00\x00\x00' >> "$TMP/t.pcap"
+          printf '\xff\xff\xff\xff\xff\xff\xde\xad\xbe\xef\x00\x01\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\xde\xad\xbe\xef\x00\x01\xc0\xa8\x01\x01\x00\x00\x00\x00\x00\x00\xc0\xa8\x01\xfe' >> "$TMP/t.pcap"
+          mac=$("$TSHARK" -r "$TMP/t.pcap" -T fields -e arp.src.hw_mac 2>/dev/null | head -1)
+          [ "$mac" = "de:ad:be:ef:00:01" ] \
+            && ok "ARP dissector (MAC: $mac)" || err "ARP dissector (got: $mac)"
+
+          echo ""
+          echo "--- 4. Display filter ---"
+          "$TSHARK" -r "$TMP/t.pcap" -Y "arp.opcode == 1" -c 1 -q 2>/dev/null \
+            && ok "display filter (arp.opcode == 1)" || err "display filter"
+
+          # pytest suite — runs against installed binaries via WS_BIN_PATH.
+          # Requires python3 >= 3.7 (subprocess.run(capture_output=) in subprocesstest.py)
+          # and bundled test/. Installs pytest from pre-downloaded wheels; no internet needed.
+          PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
+          PYMAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
+          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 7 ] \
+              && [ -d "$SCRIPT_DIR/test" ] \
+              && python3 -m pip --version >/dev/null 2>&1; then
+            echo ""
+            echo "--- 5. pytest suite (Python $PYMAJOR.$PYMINOR) ---"
+            pytest_ok=0
+            python3 -m pip install --quiet --no-index \
+              --find-links "$SCRIPT_DIR/wheels" pytest \
+              && pytest_ok=1 \
+              || err "pytest suite (pip install failed)"
+            if [ "$pytest_ok" -eq 1 ]; then
+              WS_BIN_PATH=/usr/bin python3 -m pytest \
+                --rootdir "$SCRIPT_DIR" \
+                --override-ini="addopts=-ra" \
+                --disable-capture \
+                --disable-gui \
+                --skip-missing-programs all \
+                -v --tb=short \
+                "$SCRIPT_DIR/test/suite_dfilter" \
+                "$SCRIPT_DIR/test/suite_dissectors" \
+                "$SCRIPT_DIR/test/suite_clopts.py" \
+                && ok "pytest suite" || err "pytest suite"
+            fi
+          else
+            echo "  (skipping pytest: requires python3 >= 3.7 + pip + bundled test/)"
+          fi
+
+          echo ""
+          echo "=== Results: $pass passed, $fail failed ==="
+          [ "$fail" -eq 0 ] && exit 0 || exit 1
+          TEST_SCRIPT
+          chmod +x rpm-el8/test-install.sh
+
+      # Verify that the produced RPMs are valid and contain the expected
+      # binaries before uploading them as workflow artifacts.
+      - name: Verify EL8 RPMs
+        run: |
+          echo "=== RPMs produced ==="
+          ls -lh rpm-el8/
+          rpm_count=$(ls rpm-el8/*.rpm 2>/dev/null | wc -l)
+          [ "$rpm_count" -gt 0 ] || { echo "FAIL: no RPMs produced"; exit 1; }
+          echo "PASS: $rpm_count RPM(s) found"
+          for rpm in rpm-el8/*.rpm; do
+            echo "--- $rpm ---"
+            rpm -qip "$rpm"
+          done
+          base_rpm=$(ls rpm-el8/wireshark-[0-9]*.rpm 2>/dev/null | head -1)
+          rpm -qlp "$base_rpm" | grep -q 'bin/tshark' \
+            && echo "PASS: tshark binary found in base RPM" \
+            || { echo "FAIL: tshark not in base RPM"; exit 1; }
+
+      # Install the produced RPMs into the current container (all deps are
+      # already present from the build step) and verify tshark runs correctly.
+      - name: Smoke-test installed EL8 tshark
+        run: |
+          dnf install -y rpm-el8/*.rpm
+          echo "--- tshark --version (installed) ---"
+          tshark --version
+          tshark --version 2>&1 | grep -qi 'TShark' \
+            && echo "PASS: installed tshark --version succeeded"
+          echo "--- read arp.pcap (installed) ---"
+          tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
+            && echo "PASS: installed tshark reads pcap"
+
+      - name: Upload EL8 RPMs
+        uses: actions/upload-artifact@v6
+        with:
+          name: wireshark-el8-rpms
+          path: rpm-el8
+          overwrite: true
+
+  # ---------------------------------------------------------------------------
+  # Enterprise Linux 7 – CentOS 7
+  #
+  # The ubuntu-latest host runner is used because CentOS 7 (glibc 2.17) is
+  # incompatible with the Node.js 24 runtime required by actions/checkout
+  # when the container: directive is used.  The full build runs inside a
+  # centos:7 Docker container via "docker run".
+  # Uses SCL devtoolset-9 (GCC 9) for C++17 support and cmake3 from EPEL.
+  # ---------------------------------------------------------------------------
+  el7:
+    name: Build EL7 RPMs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set release version
+        run: python3 tools/make-version.py --set-release .
+
+      - name: Build EL7 RPMs in CentOS 7 container
+        run: |
+          docker run --rm -i \
+            -v "$PWD:/workspace:z" \
+            -w /workspace \
+            centos:7 bash -ex <<'EL7_BUILD'
+              set -o pipefail
+              # Fix CentOS 7 repos to use vault over HTTPS (EOL June 2024)
+              sed -i "s/mirrorlist/#mirrorlist/g" /etc/yum.repos.d/CentOS-*.repo
+              sed -i "s|#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" \
+                /etc/yum.repos.d/CentOS-*.repo
+
+              # Install EPEL and SCL
+              yum install -y epel-release centos-release-scl
+
+              # Unconditionally rewrite SCL repo files with known-good vault HTTPS
+              # URLs.  The heredoc quoting (<<'EL7_BUILD') means the host shell
+              # does not expand anything, so single quotes and dollar signs are
+              # safe in comments and echo arguments throughout this script.
+              # \$basearch is kept as-is: inside bash double-quoted echo args the
+              # backslash-dollar produces a literal $basearch that yum expands.
+              { echo "[centos-sclo-sclo]"; echo "name=CentOS-7 - SCLo sclo"; echo "baseurl=https://vault.centos.org/centos/7/sclo/\$basearch/sclo/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl.repo
+              { echo "[centos-sclo-rh]"; echo "name=CentOS-7 - SCLo rh"; echo "baseurl=https://vault.centos.org/centos/7/sclo/\$basearch/rh/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
+
+              # Install build dependencies.
+              # devtoolset-9: GCC 9 with full C++17 support (system GCC 4.8.5 lacks C++17)
+              # cmake3: EPEL7 cmake3 is version 3.17.5, below Wireshark's cmake >= 3.20
+              #         requirement; cmake 3.28 is bootstrapped from source below.
+              # bzip2: needed for tar -xjf when building libgcrypt from source
+              yum install -y \
+                bzip2 git \
+                gcc gcc-c++ \
+                devtoolset-9-gcc devtoolset-9-gcc-c++ devtoolset-9-binutils \
+                cmake3 cmake3-rpm-macros \
+                flex ninja-build python3 rh-python38 \
+                glib2-devel libpcap-devel zlib-devel libgcrypt-devel \
+                pcre2-devel libxml2-devel \
+                libcap-devel krb5-devel lz4-devel snappy-devel \
+                libmaxminddb-devel gnutls-devel nghttp2-devel opus-devel \
+                qt5-qtbase-devel qt5-qtmultimedia-devel qt5-linguist \
+                desktop-file-utils hicolor-icon-theme \
+                rpm-build rubygem-asciidoctor
+
+              # cmake3 from EPEL7 is version 3.17.5, which is below Wireshark's
+              # cmake >= 3.20 requirement.  cmake.org prebuilt binaries for
+              # cmake 3.27+ are built on Ubuntu 20.04 and require glibc >= 2.31,
+              # but CentOS 7 only has glibc 2.17 so they fail with "command not
+              # found" (execve ENOENT on missing glibc symbol).
+              # cmake 3.28 is bootstrapped from source below using devtoolset-9.
+              export PATH=/usr/local/bin:$PATH
+
+              # CentOS 7 ships libgcrypt 1.5.3; Wireshark requires >= 1.8.0.
+              # Build libgpg-error (required by libgcrypt) and libgcrypt from source
+              # and install them to /usr/local, which cmake searches before /usr.
+              curl -fsSL https://gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-1.46.tar.bz2 \
+                | tar -xjf - -C /tmp
+              cd /tmp/libgpg-error-1.46
+              ./configure --prefix=/usr/local --disable-nls --disable-doc --quiet
+              make -j$(nproc)
+              make install
+              # Register /usr/local/lib in the dynamic linker so the shared
+              # library is found during the libgcrypt configure link test.
+              grep -qx '/usr/local/lib' /etc/ld.so.conf.d/local.conf 2>/dev/null \
+                || echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
+              ldconfig
+              # libgpg-error >= 1.33 ships gpgrt-config instead of the old
+              # gpg-error-config.  libgcrypt 1.8.x configure still calls
+              # gpg-error-config, so provide a compatibility symlink.
+              ln -sf /usr/local/bin/gpgrt-config /usr/local/bin/gpg-error-config
+              cd /workspace
+
+              curl -fsSL https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.8.9.tar.bz2 \
+                | tar -xjf - -C /tmp
+              cd /tmp/libgcrypt-1.8.9
+              # gpgrt-config (our gpg-error-config compat symlink) calls pkg-config
+              # internally.  /usr/local/lib/pkgconfig is not in the default
+              # PKG_CONFIG_PATH on CentOS 7, so set it explicitly.
+              PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure --prefix=/usr/local \
+                --with-libgpg-error-prefix=/usr/local --disable-doc --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # CentOS 7 ships c-ares 1.10.0; Wireshark requires >= 1.13.0.
+              # Build c-ares from source and install to /usr/local.
+              # --disable-tests: c-ares 1.19.1 bundles gmock 1.11.0 which requires
+              # C++17 constexpr.  GCC 9 (devtoolset-9) rejects it at default settings,
+              # causing make to fail with "body of constexpr function not a return-
+              # statement".  The tests are not needed for the library itself.
+              curl -fsSL https://github.com/c-ares/c-ares/releases/download/cares-1_19_1/c-ares-1.19.1.tar.gz \
+                | tar -xzf - -C /tmp
+              cd /tmp/c-ares-1.19.1
+              ./configure --prefix=/usr/local --disable-tests --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # CentOS 7 ships libxml2 2.9.1; Wireshark requires >= 2.9.7.
+              # Build libxml2 from source and install to /usr/local.
+              curl -fsSL https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz \
+                | tar -xJf - -C /tmp
+              cd /tmp/libxml2-2.9.14
+              ./configure --prefix=/usr/local --disable-static --without-python --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # Override RPM compiler macros so rpmbuild uses devtoolset-9
+              # GCC instead of the system-default GCC 4.8.5 (no C++17).
+              echo "%__cc  /opt/rh/devtoolset-9/root/usr/bin/gcc" >> /etc/rpm/macros
+              echo "%__cxx /opt/rh/devtoolset-9/root/usr/bin/g++" >> /etc/rpm/macros
+              # Provide gcc/g++ on PATH for cmake compiler detection.
+              ln -sf /opt/rh/devtoolset-9/root/usr/bin/gcc /usr/local/bin/gcc
+              ln -sf /opt/rh/devtoolset-9/root/usr/bin/g++ /usr/local/bin/g++
+
+              source /opt/rh/devtoolset-9/enable
+
+              # devtoolset-9 enable prepends its own dirs to PATH but may not
+              # preserve /usr/local/bin additions we made before sourcing it.
+              # Re-export so /usr/local/lib-installed pkg-config wrappers are found.
+              export PATH=/usr/local/bin:$PATH
+
+              # Bootstrap cmake 3.28 from source using devtoolset-9 GCC.
+              # EPEL7 cmake3 is 3.17.5 (below Wireshark's >= 3.20 requirement)
+              # and cmake.org prebuilt binaries require glibc >= 2.31 which
+              # CentOS 7 does not provide.
+              curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6.tar.gz \
+                -o /tmp/cmake-3.28.6.tar.gz
+              tar -xzf /tmp/cmake-3.28.6.tar.gz -C /tmp
+              cd /tmp/cmake-3.28.6
+              CC=/opt/rh/devtoolset-9/root/usr/bin/gcc \
+              CXX=/opt/rh/devtoolset-9/root/usr/bin/g++ \
+              ./bootstrap --prefix=/usr/local --parallel=$(nproc) -- \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_USE_OPENSSL=OFF \
+                -DBUILD_CursesDialog=OFF \
+                -DBUILD_TESTING=OFF
+              make -j$(nproc)
+              make install
+              # Overwrite /usr/bin/cmake3 (EPEL7 3.17.5) with cmake 3.28.
+              ln -sf /usr/local/bin/cmake /usr/local/bin/cmake3
+              ln -sf /usr/local/bin/cmake /usr/bin/cmake3
+              cd /workspace
+
+              # Export PKG_CONFIG_PATH so cmake finds all /usr/local-installed
+              # packages (libgcrypt, c-ares, libxml2, etc.) via pkg-config before
+              # the older system versions.
+              export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+
+              git config --global --add safe.directory /workspace
+              # Use -DBUILD_wireshark=OFF here: CentOS 7 ships Qt 5.9.x which is
+              # below the >= 5.15 minimum; the wireshark GUI build is performed
+              # inside rpmbuild which uses the RPM spec's own cmake invocation.
+              # Do NOT use -GNinja: cmake detects the Ninja generator and passes
+              # --with ninja to rpmbuild.  CentOS 7 ships RPM 4.11.3 which does
+              # not support the boolean dependency syntax used in the spec:
+              #   BuildRequires: (ninja or ninja-build)
+              # RPM 4.11 requires dependency tokens to start with an alphanumeric
+              # character, '_', or '/'.  Without -GNinja cmake passes no --with
+              # ninja flag and rpmbuild falls back to make, which is available.
+              cmake3 -S . -B build \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DCMAKE_INSTALL_LIBDIR=lib64 \
+                -DBUILD_wireshark=OFF \
+                -DBUILD_sharkd=OFF \
+                -DUSE_qt6=OFF \
+                -DENABLE_WERROR=OFF \
+                -DHAVE_LINUX_IF_BONDING_H=0 \
+                -DHAVE_LINUX_SOCKIOS_H=0 \
+                -DCMAKE_PREFIX_PATH=/usr/local
+
+              # Patch the generated spec for CentOS 7 / RPM 4.11.3 compatibility.
+              # RPM 4.11.3 does not support boolean dep syntax "(A or B)".
+              # cmake also adds --with flags to rpmbuild for each found optional lib;
+              # the corresponding BuildRequires must be simple package names.
+              # c-ares is built from source to /usr/local; no RPM package is installed.
+              SPEC=build/packaging/rpm/SPECS/wireshark.spec
+              # 1. Remove rpm-build version constraint (4.11.3 < 4.13.0 requirement)
+              sed -i '/^BuildRequires:[[:space:]]*rpm-build[[:space:]]*>=/d' "$SPEC"
+              # 2. Remove c-ares BuildRequires (built from source, no RPM package)
+              sed -i '/^BuildRequires:.*cares/d' "$SPEC"
+              # 3. Replace all remaining "( A or B )" boolean dep expressions with A
+              sed -i -E 's/^(BuildRequires:[[:space:]]*)\(([^[:space:])]+)[^)]*\)/\1\2/' "$SPEC"
+              # 4. Remove cmake >= 3.13 BuildRequires: cmake is built from source at
+              #    /usr/local/bin; no RPM package provides cmake >= 3.13 on CentOS 7.
+              sed -i '/^BuildRequires:[[:space:]]*cmake[[:space:]]*>=/d' "$SPEC"
+              # 5. Remove speexdsp-devel BuildRequires: sharkd is disabled so speexdsp
+              #    is not needed.  speexdsp-devel is not available in standard EL7 repos.
+              sed -i '/^BuildRequires:.*speexdsp/Id' "$SPEC"
+              # 6. Add /usr/local prefix path, bonding-header suppression, and
+              #    sharkd=OFF to the cmake invocation inside %build so rpmbuild finds
+              #    our custom libraries (libgcrypt 1.8.9, c-ares 1.19.1, libxml2 2.9.14)
+              #    before system ones, and does not attempt to build sharkd.
+              awk '/^%cmake \\$/ {
+                print
+                print "  -DCMAKE_PREFIX_PATH=/usr/local \\"
+                print "  -DHAVE_LINUX_IF_BONDING_H=0 \\"
+                print "  -DHAVE_LINUX_SOCKIOS_H=0 \\"
+                print "  -DBUILD_sharkd=OFF \\"
+                next
+              }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
+              # 7. Replace the %cmake RPM macro call with an explicit cmake3 command.
+              #    cmake3-rpm-macros on CentOS 7 / EPEL7 defines %cmake3 but not
+              #    %cmake.  The Wireshark spec uses %cmake which RPM leaves as
+              #    literal text; bash then fails to execute it regardless of
+              #    whether job control (set -m) is enabled.
+              #    We replace the single "%cmake \" line with a direct cmake3
+              #    invocation (no background job, no fg) that includes the standard
+              #    install-prefix / build-type flags normally injected by the macro.
+              #    The extra flags we injected with awk above remain as continuation
+              #    lines after this replacement.
+              sed -i 's|^%cmake \\$|cmake3 -S . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_VERBOSE_MAKEFILE=ON \\|' "$SPEC"
+              # 8. Replace %cmake_build with an explicit make command.
+              #    On CentOS 7, %cmake_build expands to "%cmake3 --build ." which
+              #    itself uses the same "& fg" job-control pattern as %cmake.
+              #    Replacing it with a direct make invocation avoids the fg error.
+              sed -i 's|^%cmake_build$|make -j$(nproc)|' "$SPEC"
+              # 9a. Replace %cmake_install --component X with cmake3 --install.
+              #     dftest, idl2wrs, headers, cmake config, and wireshark.pc are all
+              #     installed with EXCLUDE_FROM_ALL in their install() rules; plain
+              #     "make install" (the cmake-generated Makefile "install" target) skips
+              #     EXCLUDE_FROM_ALL items.  Only "cmake --install --component X"
+              #     explicitly installs them.  This fixes "File not found" errors for
+              #     %{_bindir}/dftest, %{_bindir}/idl2wrs, %{_includedir}/wireshark,
+              #     %{_libdir}/cmake/wireshark, and %{_libdir}/pkgconfig/wireshark.pc.
+              sed -i 's|^%cmake_install --component \(.*\)$|DESTDIR="%{buildroot}" cmake3 --install . --component \1|' "$SPEC"
+              # 9b. Replace bare %cmake_install with make install (all non-EXCLUDE_FROM_ALL).
+              sed -i 's|^%cmake_install$|make DESTDIR=%{buildroot} install|' "$SPEC"
+              # 10. Set UTF-8 locale in %build: cmake's Python code-generation scripts
+              #     (e.g. make-plugin-reg.py) open UTF-8 source files without an explicit
+              #     encoding= argument.  CentOS 7's default locale is POSIX (ASCII), so
+              #     Python 3.x raises UnicodeDecodeError on files like profinet/*.c that
+              #     contain non-ASCII bytes (UTF-8 copyright symbols etc.).
+              sed -i '/^%build$/a export LC_ALL=en_US.UTF-8' "$SPEC"
+              echo "=== Patched BuildRequires ==="
+              grep "^BuildRequires" "$SPEC"
+              cmake3 --build build --target tshark --target test-programs --target dftest --target text2pcap
+
+              # C unit tests (run directly without pytest).
+              export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+              for prog in exntest fifo_string_cache_test oids_test reassemble_test tvbtest wmem_test wscbor_test wscbor_enc_test test_epan test_wsutil; do
+                echo "=== $prog ==="
+                build/run/$prog && echo "PASS: $prog" || { echo "FAIL: $prog"; exit 1; }
+              done
+
+              # tshark smoke test.
+              build/run/tshark --version
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
+                && echo "PASS: tshark reads arp.pcap"
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 build/run/tshark -G protocols 2>/dev/null | grep -qi "^tcp" \
+                && echo "PASS: protocol database loads"
+
+              # pytest suite using Python 3.8 (rh-python38 from SCL).
+              # CentOS 7's python3 is 3.6 which predates subprocess.run(capture_output=)
+              # added in Python 3.7.  Wireshark's subprocesstest.py uses capture_output=True
+              # in every dfilter/dissector test, causing TypeError in all affected tests.
+              # Use a venv + WS_BIN_PATH for the same reasons as in the EL8 job:
+              # conftest.py custom CLI options may not be parsed early enough in
+              # all pytest versions, causing "unrecognized arguments" failures.
+              /opt/rh/rh-python38/root/usr/bin/python3.8 -m venv /tmp/pytest-env
+              /tmp/pytest-env/bin/pip install --quiet pytest pytest-xdist
+              export WS_BIN_PATH="$PWD/build/run"
+              export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+              /tmp/pytest-env/bin/pytest \
+                -ra -v --tb=short \
+                --deselect test/suite_dfilter/group_syntax.py::TestDfilterSyntax::test_exists_5 \
+                test/suite_unittests.py \
+                test/suite_dfilter \
+                test/suite_dissectors
+              # -----------------------------------------------------------
+
+              cmake3 --build build --target dist
+              cmake3 --build build --target wireshark_rpm
+              # Bundle custom runtime libraries into the workspace so the host
+              # runner can package them alongside the RPMs for offline deployment.
+              mkdir -p /workspace/el7-custom-libs
+              cp -a /usr/local/lib/libgpg-error.so*  /workspace/el7-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgcrypt.so*     /workspace/el7-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libcares.so*      /workspace/el7-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libxml2.so*       /workspace/el7-custom-libs/ 2>/dev/null || true
+              cp -a /opt/rh/devtoolset-9/root/usr/lib64/libstdc++.so* /workspace/el7-custom-libs/ 2>/dev/null || true
+              cp -a /opt/rh/devtoolset-9/root/usr/lib64/libgcc_s.so*  /workspace/el7-custom-libs/ 2>/dev/null || true
+              # Restore ownership so the host runner (non-root) can mv/rm the
+              # root-owned files that Docker created in the mounted workspace.
+              chown -R "$(stat -c '%u:%g' /workspace)" /workspace/build /workspace/el7-custom-libs
+          EL7_BUILD
+
+      - name: Collect RPMs
+        run: |
+          mkdir rpm-el7
+          find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el7/ \;
+
+      # ─── Offline deployment bundle ───────────────────────────────────────────
+      # Produces a self-contained directory that can be copied to a fully offline
+      # machine (no internet, no compiler, only rpm available) and deployed with:
+      #   sudo bash install.sh   →  deploys bundled runtime libs + installs RPMs
+      #   bash test-install.sh   →  tshark smoke tests + pytest suite (offline)
+      - name: Bundle EL7 offline installer
+        run: |
+          # Package runtime libs collected from the build container.
+          if [ -d el7-custom-libs ]; then
+            tar czf rpm-el7/custom-libs.tar.gz -C el7-custom-libs/ .
+            rm -rf el7-custom-libs/
+          fi
+
+          # Test suites that run against an installed binary (no build tree needed).
+          mkdir -p rpm-el7/test
+          cp pytest.ini rpm-el7/
+          cp test/conftest.py test/matchers.py test/subprocesstest.py rpm-el7/test/
+          cp test/suite_clopts.py rpm-el7/test/
+          cp -r test/suite_dfilter test/suite_dissectors \
+                test/captures test/config test/keys rpm-el7/test/
+
+          # pytest 6.2.5: pure Python (py3-none-any), supports Python >= 3.5.
+          # Downloaded here in CI so the target machine needs no internet access.
+          # The wheel is version-agnostic (py3-none-any) so --python-version is
+          # not needed; the test-install.sh gate requires Python >= 3.7 anyway.
+          mkdir -p rpm-el7/wheels
+          python3 -m pip download --quiet --dest rpm-el7/wheels "pytest==6.2.5"
+
+          # ── install.sh ──────────────────────────────────────────────────────
+          cat > rpm-el7/install.sh << 'INSTALL_EL7'
+          #!/usr/bin/env bash
+          # Wireshark EL7 offline installer.  Must run as root.
+          # Only rpm is required; no yum, dnf, or internet access needed.
+          set -euo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          echo "=== Installing Wireshark (EL 7) ==="
+          if [ -f "$SCRIPT_DIR/custom-libs.tar.gz" ]; then
+            echo "--- Deploying bundled runtime libraries ---"
+            mkdir -p /usr/local/lib
+            tar xzf "$SCRIPT_DIR/custom-libs.tar.gz" -C /usr/local/lib/
+            echo /usr/local/lib > /etc/ld.so.conf.d/wireshark-deps.conf
+            ldconfig
+          fi
+          echo "--- Installing Wireshark RPMs ---"
+          rpm -Uvh "$SCRIPT_DIR"/wireshark*.rpm
+          echo ""
+          echo "=== Done.  Verify with: tshark --version ==="
+          INSTALL_EL7
+          chmod +x rpm-el7/install.sh
+
+          # ── test-install.sh ─────────────────────────────────────────────────
+          cat > rpm-el7/test-install.sh << 'TEST_SCRIPT'
+          #!/usr/bin/env bash
+          # Wireshark post-install functional tests.
+          # python3 >= 3.7 is required for the pytest suite (subprocess.run(capture_output=)
+          # was added in 3.7); no compiler or internet needed.
+          set -uo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          TSHARK=${TSHARK:-$(command -v tshark 2>/dev/null || echo /usr/bin/tshark)}
+          pass=0; fail=0
+          ok()  { echo "  PASS: $*"; pass=$((pass+1)); }
+          err() { echo "  FAIL: $*"; fail=$((fail+1)); }
+
+          echo "=== Wireshark post-install tests ==="
+          echo "tshark: $TSHARK"
+
+          echo ""
+          echo "--- 1. tshark --version ---"
+          "$TSHARK" --version 2>&1 | head -1
+          "$TSHARK" --version 2>&1 | grep -qi "TShark" \
+            && ok "tshark --version" || err "tshark --version"
+
+          echo ""
+          echo "--- 2. Protocol database ---"
+          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || true)
+          [ "$count" -gt 100 ] \
+            && ok "$count protocols loaded" || err "protocol DB ($count protocols)"
+
+          echo ""
+          echo "--- 3. ARP packet dissection ---"
+          TMP=$(mktemp -d)
+          cleanup() { rm -rf "$TMP"; }
+          trap cleanup EXIT
+          # Minimal pcap: global header (24 B) + record header (16 B) + ARP request (42 B).
+          printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' > "$TMP/t.pcap"
+          printf '\x00\x00\x00\x00\x00\x00\x00\x00\x2a\x00\x00\x00\x2a\x00\x00\x00' >> "$TMP/t.pcap"
+          printf '\xff\xff\xff\xff\xff\xff\xde\xad\xbe\xef\x00\x01\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\xde\xad\xbe\xef\x00\x01\xc0\xa8\x01\x01\x00\x00\x00\x00\x00\x00\xc0\xa8\x01\xfe' >> "$TMP/t.pcap"
+          mac=$("$TSHARK" -r "$TMP/t.pcap" -T fields -e arp.src.hw_mac 2>/dev/null | head -1)
+          [ "$mac" = "de:ad:be:ef:00:01" ] \
+            && ok "ARP dissector (MAC: $mac)" || err "ARP dissector (got: $mac)"
+
+          echo ""
+          echo "--- 4. Display filter ---"
+          "$TSHARK" -r "$TMP/t.pcap" -Y "arp.opcode == 1" -c 1 -q 2>/dev/null \
+            && ok "display filter (arp.opcode == 1)" || err "display filter"
+
+          # pytest suite — runs against installed binaries via WS_BIN_PATH.
+          # Requires python3 >= 3.7 (subprocess.run(capture_output=) in subprocesstest.py)
+          # and bundled test/. Installs pytest from pre-downloaded wheels; no internet needed.
+          PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
+          PYMAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
+          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 7 ] \
+              && [ -d "$SCRIPT_DIR/test" ] \
+              && python3 -m pip --version >/dev/null 2>&1; then
+            echo ""
+            echo "--- 5. pytest suite (Python $PYMAJOR.$PYMINOR) ---"
+            pytest_ok=0
+            python3 -m pip install --quiet --no-index \
+              --find-links "$SCRIPT_DIR/wheels" pytest \
+              && pytest_ok=1 \
+              || err "pytest suite (pip install failed)"
+            if [ "$pytest_ok" -eq 1 ]; then
+              WS_BIN_PATH=/usr/bin python3 -m pytest \
+                --rootdir "$SCRIPT_DIR" \
+                --override-ini="addopts=-ra" \
+                --disable-capture \
+                --disable-gui \
+                --skip-missing-programs all \
+                -v --tb=short \
+                "$SCRIPT_DIR/test/suite_dfilter" \
+                "$SCRIPT_DIR/test/suite_dissectors" \
+                "$SCRIPT_DIR/test/suite_clopts.py" \
+                && ok "pytest suite" || err "pytest suite"
+            fi
+          else
+            echo "  (skipping pytest: requires python3 >= 3.7 + pip + bundled test/)"
+          fi
+
+          echo ""
+          echo "=== Results: $pass passed, $fail failed ==="
+          [ "$fail" -eq 0 ] && exit 0 || exit 1
+          TEST_SCRIPT
+          chmod +x rpm-el7/test-install.sh
+
+      # Verify that the produced EL7 RPMs are valid and contain the expected
+      # binaries.  rpm -qip/rpm -qlp are pure file operations (no repos needed).
+      - name: Verify EL7 RPMs
+        run: |
+          echo "=== RPMs produced ==="
+          ls -lh rpm-el7/
+          rpm_count=$(ls rpm-el7/*.rpm 2>/dev/null | wc -l)
+          [ "$rpm_count" -gt 0 ] || { echo "FAIL: no RPMs produced"; exit 1; }
+          echo "PASS: $rpm_count RPM(s) found"
+          docker run --rm \
+            -v "$PWD/rpm-el7:/rpms:z" \
+            centos:7 bash -exc '
+              for rpm in /rpms/*.rpm; do
+                echo "--- $rpm ---"
+                rpm -qip "$rpm"
+              done
+              base_rpm=$(ls /rpms/wireshark-[0-9]*.rpm 2>/dev/null | head -1)
+              rpm -qlp "$base_rpm" | grep -q "bin/tshark" \
+                && echo "PASS: tshark binary in base RPM" \
+                || { echo "FAIL: tshark not in base RPM"; exit 1; }
+            '
+
+      - name: Upload EL7 RPMs
+        uses: actions/upload-artifact@v6
+        with:
+          name: wireshark-el7-rpms
+          path: rpm-el7
+          overwrite: true
+
+  # ---------------------------------------------------------------------------
+  # Enterprise Linux 6 – CentOS 6
+  #
+  # The ubuntu-latest host runner is used because centos:6 (glibc 2.12) is
+  # incompatible with the Node.js 24 runtime required by actions/checkout when
+  # using the container: directive.  The full build runs inside a centos:6
+  # Docker container via "docker run".
+  #
+  # The following dependencies are too old (or absent) in CentOS 6 / EPEL 6
+  # and are therefore built from source, installed under /usr/local:
+  #   cmake 3.28   – EPEL6 cmake3 3.6.1 does not meet the >= 3.20 requirement;
+  #                  cmake.org binaries require glibc >= 2.17 but CentOS 6 has
+  #                  glibc 2.12.  Built via cmake's own bootstrap script.
+  #   glib2 2.54   – CentOS 6 ships glib2 2.28; Wireshark requires >= 2.54.
+  #   pcre2        – Not available in CentOS 6 or EPEL 6.
+  #   libxml2      – CentOS 6 ships libxml2 2.7.6; Wireshark requires >= 2.9.7.
+  #   libgpg-error – CentOS 6 ships 1.7; libgcrypt 1.8+ requires a newer
+  #                  gpgrt-config (introduced in libgpg-error 1.33).
+  #   libgcrypt    – CentOS 6 ships 1.4.5; Wireshark requires >= 1.8.0.
+  #   c-ares       – CentOS 6 ships 1.7.0; Wireshark requires >= 1.13.0.
+  # ---------------------------------------------------------------------------
+  el6:
+    name: Build EL6 RPMs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set release version
+        run: python3 tools/make-version.py --set-release .
+
+      - name: Build EL6 RPMs in CentOS 6 container
+        run: |
+          docker run --rm -i \
+            -v "$PWD:/workspace:z" \
+            -w /workspace \
+            centos:6 bash -ex <<'EL6_BUILD'
+              set -o pipefail
+              # Fix CentOS 6 repos to use vault over HTTPS (EOL November 2020)
+              sed -i "s/mirrorlist/#mirrorlist/g" /etc/yum.repos.d/CentOS-*.repo
+              sed -i "s|#baseurl=http://mirror.centos.org/centos/\$releasever|baseurl=https://vault.centos.org/centos/6|g" \
+                /etc/yum.repos.d/CentOS-*.repo
+
+              # Install EPEL 6 (archived)
+              yum install -y \
+                https://archives.fedoraproject.org/pub/archive/epel/6/x86_64/epel-release-6-8.noarch.rpm
+
+              # Install SCL for devtoolset-7 (GCC 7, C++17 support)
+              yum install -y centos-release-scl
+
+              # Unconditionally rewrite SCL repo files with known-good vault HTTPS
+              # URLs.  The heredoc quoting (<<'EL6_BUILD') keeps this entire script
+              # safe from host-side shell expansion, so single quotes and apostrophes
+              # are allowed anywhere in comments and echo arguments.
+              { echo "[centos-sclo-sclo]"; echo "name=CentOS-6 - SCLo sclo"; echo "baseurl=https://vault.centos.org/centos/6/sclo/\$basearch/sclo/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl.repo
+              { echo "[centos-sclo-rh]"; echo "name=CentOS-6 - SCLo rh"; echo "baseurl=https://vault.centos.org/centos/6/sclo/\$basearch/rh/"; echo "gpgcheck=1"; echo "enabled=1"; echo "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-SCLo"; } > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo
+
+              # Install available build tools and system dependencies.
+              # cmake3 from EPEL6 (3.6.1) is installed only for cmake3-rpm-macros;
+              # the binary is replaced by a cmake 3.28 bootstrap build below.
+              # rh-python36 (CentOS 6 SCL) provides Python 3.6, satisfying
+              # Wireshark's find_package(Python3 3.6 REQUIRED) in CMakeLists.txt.
+              # python34 is too old (cmake requires Python >= 3.6).
+              yum install -y \
+                bzip2 git curl gettext \
+                gcc gcc-c++ \
+                devtoolset-7-gcc devtoolset-7-gcc-c++ devtoolset-7-binutils \
+                cmake3 cmake3-rpm-macros \
+                flex make autoconf libtool pkgconfig xz \
+                libffi-devel pcre-devel \
+                libpcap-devel zlib-devel \
+                libcap-devel krb5-devel \
+                gnutls-devel \
+                speex-devel \
+                rh-python36 \
+                desktop-file-utils \
+                rpm-build
+
+              # Enable devtoolset-7 (GCC 7, C++17) before all from-source builds.
+              # cmake 3.28 bootstrap requires C++11; system GCC 4.4 does not support it.
+              source /opt/rh/devtoolset-7/enable
+
+              # Enable rh-python36 (Python 3.6) so cmake finds Python3 >= 3.6.
+              # Wireshark's CMakeLists.txt has find_package(Python3 3.6 REQUIRED).
+              source /opt/rh/rh-python36/enable
+
+              # Register devtoolset-7 runtime libs in ldconfig so that binaries
+              # compiled with it can run even when it is not explicitly sourced
+              # (e.g. when rpmbuild invokes cmake without sourcing devtoolset-7).
+              grep -qx '/opt/rh/devtoolset-7/root/usr/lib64' /etc/ld.so.conf.d/devtoolset-7.conf 2>/dev/null \
+                || echo /opt/rh/devtoolset-7/root/usr/lib64 >> /etc/ld.so.conf.d/devtoolset-7.conf
+              grep -qx '/usr/local/lib' /etc/ld.so.conf.d/local.conf 2>/dev/null \
+                || echo /usr/local/lib >> /etc/ld.so.conf.d/local.conf
+              ldconfig
+
+              # Ensure /usr/local/bin is on PATH so our cmake3/gcc/g++ symlinks are
+              # found after the SCL source commands above may have modified PATH.
+              export PATH=/usr/local/bin:$PATH
+
+              # Build cmake 3.28.6 from source via cmake bootstrap.
+              # cmake.org binaries require glibc >= 2.17; CentOS 6 has glibc 2.12.
+              curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.28.6/cmake-3.28.6.tar.gz \
+                | tar -xzf - -C /tmp
+              cd /tmp/cmake-3.28.6
+              CC=/opt/rh/devtoolset-7/root/usr/bin/gcc \
+              CXX=/opt/rh/devtoolset-7/root/usr/bin/g++ \
+              ./bootstrap --prefix=/usr/local --parallel=$(nproc) -- \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_USE_OPENSSL=OFF \
+                -DBUILD_CursesDialog=OFF
+              make -j$(nproc)
+              make install
+              ln -sf /usr/local/bin/cmake /usr/local/bin/cmake3
+              ln -sf /usr/local/bin/cmake /usr/bin/cmake3
+              cd /workspace
+
+              # libgpg-error 1.46 (CentOS 6 ships 1.7; needed for libgcrypt >= 1.8).
+              curl -fsSL https://gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-1.46.tar.bz2 \
+                | tar -xjf - -C /tmp
+              cd /tmp/libgpg-error-1.46
+              ./configure --prefix=/usr/local --disable-nls --disable-doc --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              # libgpg-error >= 1.33 ships gpgrt-config; libgcrypt 1.8.x configure
+              # still calls the old gpg-error-config name.
+              ln -sf /usr/local/bin/gpgrt-config /usr/local/bin/gpg-error-config
+              cd /workspace
+
+              # libgcrypt 1.8.9 (CentOS 6 ships 1.4.5; Wireshark requires >= 1.8.0).
+              curl -fsSL https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.8.9.tar.bz2 \
+                | tar -xjf - -C /tmp
+              cd /tmp/libgcrypt-1.8.9
+              PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+              ./configure --prefix=/usr/local \
+                --with-libgpg-error-prefix=/usr/local --disable-doc --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # c-ares 1.19.1 (CentOS 6 ships 1.7.0; Wireshark requires >= 1.13.0).
+              # --disable-tests: c-ares 1.19.1 bundles gmock 1.11.0 which requires
+              # C++17 constexpr.  GCC 7 (devtoolset-7) rejects it at default settings.
+              curl -fsSL https://github.com/c-ares/c-ares/releases/download/cares-1_19_1/c-ares-1.19.1.tar.gz \
+                | tar -xzf - -C /tmp
+              cd /tmp/c-ares-1.19.1
+              ./configure --prefix=/usr/local --disable-tests --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # glib2 2.54.3 (CentOS 6 ships glib2 2.28; Wireshark requires >= 2.54).
+              # --with-pcre=internal: use glib2's bundled PCRE copy instead of the
+              # system pcre1, because PKG_CONFIG_PATH=/usr/local/lib/pkgconfig does
+              # not include /usr/lib64/pkgconfig where the system pcre.pc lives, so
+              # --with-pcre=system would fail with "Package requirements (libpcre >=
+              # 8.13) were not met".
+              # --disable-libmount: libmount (util-linux) is not available in
+              # CentOS 6; disabling it avoids a hard configure error.
+              # MSGFMT=/usr/bin/true: glib2 2.54.3's configure.ac calls
+              # AM_GNU_GETTEXT unconditionally (even with --disable-nls), which
+              # requires the msgfmt program.  Providing /usr/bin/true as a stub
+              # lets the check pass; since NLS is disabled, msgfmt is never
+              # actually invoked during the build.
+              curl -fsSL https://download.gnome.org/sources/glib/2.54/glib-2.54.3.tar.xz \
+                | xz -dc | tar -xf - -C /tmp
+              cd /tmp/glib-2.54.3
+              MSGFMT=/usr/bin/true \
+              PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+              LDFLAGS="-Wl,-rpath,/usr/local/lib" \
+              CFLAGS="-Wno-error=format-overflow" \
+              ./configure --prefix=/usr/local \
+                --disable-nls --disable-man --disable-gtk-doc \
+                --with-pcre=internal \
+                --disable-libmount
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # pcre2 10.42 (not available in CentOS 6 or EPEL 6; required by Wireshark).
+              curl -fsSL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.42/pcre2-10.42.tar.bz2 \
+                | tar -xjf - -C /tmp
+              cd /tmp/pcre2-10.42
+              ./configure --prefix=/usr/local --disable-static --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # libxml2 2.9.14 (CentOS 6 ships 2.7.6; Wireshark requires >= 2.9.7).
+              curl -fsSL https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz \
+                | xz -dc | tar -xf - -C /tmp
+              cd /tmp/libxml2-2.9.14
+              ./configure --prefix=/usr/local --disable-static --without-python --quiet
+              make -j$(nproc)
+              make install
+              ldconfig
+              cd /workspace
+
+              # Override RPM compiler macros to use devtoolset-7 GCC.
+              echo "%__cc  /opt/rh/devtoolset-7/root/usr/bin/gcc" >> /etc/rpm/macros
+              echo "%__cxx /opt/rh/devtoolset-7/root/usr/bin/g++" >> /etc/rpm/macros
+              # Expose devtoolset-7 gcc/g++ on PATH for cmake compiler auto-detection.
+              ln -sf /opt/rh/devtoolset-7/root/usr/bin/gcc /usr/local/bin/gcc
+              ln -sf /opt/rh/devtoolset-7/root/usr/bin/g++ /usr/local/bin/g++
+              # Note: the glibc 2.12 bsearch 32-bit truncation bug that used to
+              # require -O0 or -fuse-ld=gold is now handled entirely by
+              # enterprise_local_bsearch() in epan/iana-info.c; no linker or
+              # optimisation-flag workaround is needed here.
+
+              # Export PKG_CONFIG_PATH so cmake finds all /usr/local-installed
+              # packages before the older system versions.
+              export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+
+              git config --global --add safe.directory /workspace
+              # ninja-build is not available in EPEL6; use Unix Makefiles instead.
+              # -DBUILD_sharkd=OFF: sharkd defaults to ON and requires SpeexDSP,
+              # which is not available in CentOS 6 / EPEL 6.
+              # -DCMAKE_C_FLAGS="-Dstatic_assert=_Static_assert": CentOS 6 ships
+              # glibc 2.12 whose <assert.h> does not define static_assert (added in
+              # glibc 2.16 / C11).  packet-ieee80211.c uses static_assert without
+              # including <assert.h>, so the compiler treats it as an undeclared
+              # function, leaving an undefined symbol in libwireshark.so that the
+              # tshark link step cannot resolve.  Mapping static_assert to GCC's
+              # built-in _Static_assert keyword (available in gnu11 mode) fixes this.
+              # -DCMAKE_BUILD_RPATH: Embed /usr/local/lib and the devtoolset-7
+              # runtime lib dir in the build-tree RPATH so that tshark and other
+              # binaries load the correct custom-built libraries at run time.
+              # /usr/local/lib is needed for glib2 2.54.3 (vs system glib2 2.28
+              # in /usr/lib64 – both share SONAME libglib-2.0.so.0; without an
+              # explicit RPATH the linker may pick the older one, crashing tshark).
+              # /opt/rh/devtoolset-7/root/usr/lib64 is needed for the devtoolset-7
+              # libstdc++ and libgcc_s used when GCC 7 runtime is not in the system
+              # lib path.
+              # devtoolset-7 was already sourced above; re-source here so its GCC
+              # is definitely on PATH.  /usr/local/bin is prepended after so that
+              # our cmake3/gcc/g++ symlinks there take precedence over system binaries.
+              source /opt/rh/devtoolset-7/enable
+              export PATH=/usr/local/bin:$PATH
+              cmake3 -S . -B build \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DCMAKE_INSTALL_LIBDIR=lib64 \
+                -DBUILD_wireshark=OFF \
+                -DBUILD_sharkd=OFF \
+                -DUSE_qt6=OFF \
+                -DENABLE_WERROR=OFF \
+                -DHAVE_LINUX_IF_BONDING_H=0 \
+                -DHAVE_LINUX_SOCKIOS_H=0 \
+                "-DCMAKE_C_FLAGS=-Dstatic_assert=_Static_assert" \
+                "-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64" \
+                -DCMAKE_PREFIX_PATH=/usr/local
+
+              # Patch the generated spec for CentOS 6 / RPM 4.8 compatibility.
+              # Same boolean-dep and rpm-build fixes as EL7, plus EL6-specific
+              # cmake flags for the static_assert mapping and RPATH.
+              SPEC=build/packaging/rpm/SPECS/wireshark.spec
+              sed -i '/^BuildRequires:[[:space:]]*rpm-build[[:space:]]*>=/d' "$SPEC"
+              sed -i '/^BuildRequires:.*cares/d' "$SPEC"
+              sed -i -E 's/^(BuildRequires:[[:space:]]*)\(([^[:space:])]+)[^)]*\)/\1\2/' "$SPEC"
+              # Remove cmake >= 3.13: cmake 3.28 is built from source, no RPM package
+              sed -i '/^BuildRequires:[[:space:]]*cmake[[:space:]]*>=/d' "$SPEC"
+              # Remove speexdsp-devel: sharkd is disabled; speexdsp-devel not in EL6 repos
+              sed -i '/^BuildRequires:.*speexdsp/Id' "$SPEC"
+              # Remove python3 BR: EL6 uses rh-python36 from SCL; no system 'python3' RPM.
+              sed -i '/^BuildRequires:[[:space:]]*python3/d' "$SPEC"
+              # Remove asciidoctor BR: rubygem-asciidoctor is not in EL6 repos.
+              sed -i '/^BuildRequires:.*asciidoctor/Id' "$SPEC"
+              # Remove glib2-devel BR: built from source to /usr/local; no RPM provides it.
+              sed -i '/^BuildRequires:.*glib2-devel/Id' "$SPEC"
+              # Remove pcre2-devel BR: built from source to /usr/local; no RPM provides it.
+              sed -i '/^BuildRequires:.*pcre2-devel/Id' "$SPEC"
+              # Remove libxml2-devel BR: built from source to /usr/local; no RPM provides it.
+              sed -i '/^BuildRequires:.*libxml2-devel/Id' "$SPEC"
+              # Add custom cmake flags to rpmbuild's cmake invocation so it finds
+              # /usr/local libraries and matches the same compile-time flags used in
+              # the pre-packaging build above (static_assert mapping, header guards,
+              # and RPATH so glib2 2.54 is found at link/run time inside rpmbuild).
+              # The glibc 2.12 bsearch 32-bit truncation is handled by
+              # enterprise_local_bsearch() in iana-info.c; no -O0 override needed.
+              awk '/^%cmake \\$/ {
+                print
+                print "  -DCMAKE_PREFIX_PATH=/usr/local \\"
+                print "  -DHAVE_LINUX_IF_BONDING_H=0 \\"
+                print "  -DHAVE_LINUX_SOCKIOS_H=0 \\"
+                print "  -DBUILD_sharkd=OFF \\"
+                print "  \"-DCMAKE_C_FLAGS=-Dstatic_assert=_Static_assert\" \\"
+                print "  \"-DCMAKE_BUILD_RPATH=/usr/local/lib;/opt/rh/devtoolset-7/root/usr/lib64\" \\"
+                next
+              }1' "$SPEC" > /tmp/wireshark.spec.patched && mv /tmp/wireshark.spec.patched "$SPEC"
+              # Ensure LD_LIBRARY_PATH is set in the rpmbuild %build environment so
+              # any test/run step inside rpmbuild finds our custom glib2 2.54.
+              sed -i '/^%build$/a export LD_LIBRARY_PATH=/usr/local/lib:/opt/rh/devtoolset-7/root/usr/lib64' "$SPEC"
+              # Also set UTF-8 locale: cmake's Python code-generation scripts open
+              # UTF-8 source files; CentOS 6's default POSIX locale causes UnicodeDecodeError.
+              sed -i '/^export LD_LIBRARY_PATH/a export LC_ALL=en_US.UTF-8' "$SPEC"
+              # Replace the %cmake RPM macro call with an explicit cmake3 command.
+              # cmake3-rpm-macros on CentOS 6 / EPEL6 defines %cmake3 but not
+              # %cmake.  The Wireshark spec uses %cmake which RPM leaves as
+              # literal text; bash then fails to execute it regardless of
+              # whether job control (set -m) is enabled.
+              # We replace the single "%cmake \" line with a direct cmake3
+              # invocation (no background job, no fg) that includes the standard
+              # install-prefix / build-type flags normally injected by the macro.
+              # The extra EL6-specific flags injected by awk above remain as
+              # continuation lines after this replacement.
+              sed -i 's|^%cmake \\$|cmake3 -S . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib64 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_VERBOSE_MAKEFILE=ON \\|' "$SPEC"
+              # Replace %cmake_build (expands to "%cmake3 --build ." → bg+fg) with
+              # an explicit make command that does not require job control.
+              sed -i 's|^%cmake_build$|make -j$(nproc)|' "$SPEC"
+              # Replace %cmake_install --component X with cmake3 --install.
+              # Same EXCLUDE_FROM_ALL reason as EL7 (see EL7 comments above).
+              sed -i 's|^%cmake_install --component \(.*\)$|DESTDIR="%{buildroot}" cmake3 --install . --component \1|' "$SPEC"
+              # Replace bare %cmake_install with make install (all non-EXCLUDE_FROM_ALL files).
+              sed -i 's|^%cmake_install$|make DESTDIR=%{buildroot} install|' "$SPEC"
+              # Fix %license: RPM 4.8 (EL6) does not support the %license macro.
+              # Without support, RPM treats the argument as a filename and reports
+              # "File must begin with /" because "COPYING" / "GPL-2.0-or-later"
+              # are not absolute paths.  Replace with %doc which RPM 4.8 understands.
+              # Use an ERE pattern to match any whitespace after %license (including
+              # tabs and trailing-only occurrences) so future spec changes don't
+              # silently slip through.
+              sed -i -E 's/^%license([[:space:]]+)/%doc\1/' "$SPEC"
+              # Remove the %exclude glob for the wireshark GUI binary.
+              # Qt5 is unavailable on CentOS 6, so the wireshark binary is not built
+              # and not installed.  On RPM 4.8 (EL6) an unmatched glob in a %files
+              # %exclude directive is a hard error ("File not found by glob"), whereas
+              # RPM 4.11+ (EL7) treats it as a warning.
+              sed -i '/^%exclude[[:space:]]*%{_bindir}\/wireshark/d' "$SPEC"
+              # Remove all man page entries from the spec.
+              # asciidoctor is not available on CentOS 6 / EPEL 6 so no man pages
+              # are generated.  RPM 4.8 reports "File not found by glob" as a hard
+              # error for the %{_mandir}/man1/* and %{_mandir}/man4/* globs, and
+              # similarly for the %exclude %{_mandir}/man1/wireshark.* globs.
+              sed -i '/^%{_mandir}\//d' "$SPEC"
+              sed -i '/^%exclude[[:space:]]*%{_mandir}/d' "$SPEC"
+              echo "=== Patched BuildRequires ==="
+              grep "^BuildRequires" "$SPEC"
+
+              # -----------------------------------------------------------
+              # Wireshark functional tests – run before packaging so that a
+              # test failure blocks the RPM build.
+              # NOTE: Run C unit-test programs and tshark smoke tests directly.
+              # The pytest suite is not run on EL6: rh-python36 is Python 3.6
+              # which supports f-strings, but the subprocesstest.py suite uses
+              # subprocess.run(capture_output=True) added in Python 3.7, causing
+              # TypeError in every dissector and dfilter test.
+              # text2pcap is built for consistency with EL7/EL8 (several pytest
+              # dissector tests use it to construct synthetic captures).
+              # -----------------------------------------------------------
+              cmake3 --build build --target tshark --target test-programs --target dftest --target text2pcap
+
+              # C unit tests (direct binary execution, no pytest needed).
+              export WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1
+              for prog in exntest fifo_string_cache_test oids_test reassemble_test tvbtest wmem_test wscbor_test wscbor_enc_test test_epan test_wsutil; do
+                echo "=== $prog ==="
+                build/run/$prog && echo "PASS: $prog" || { echo "FAIL: $prog"; exit 1; }
+              done
+
+              # tshark smoke test.
+              # Set LD_LIBRARY_PATH as a belt-and-suspenders measure: /usr/local/lib
+              # ensures the custom glib2 2.54.3 is found before the system glib2 2.28
+              # in /usr/lib64 (both share SONAME libglib-2.0.so.0); the devtoolset-7
+              # path ensures the GCC 7 runtime (libstdc++, libgcc_s) is available.
+              export LD_LIBRARY_PATH=/usr/local/lib:/opt/rh/devtoolset-7/root/usr/lib64
+              # Show which glib2 and libxml2 tshark resolves at runtime.
+              # '|| true' is intentional: under 'set -o pipefail', a SIGPIPE or
+              # grep non-match would otherwise abort the script; this line is
+              # diagnostic-only and should never block the build.
+              ldd build/run/tshark 2>/dev/null | grep -E "libglib|libxml2|libc\." || true
+              # enterprise_local_bsearch (installed by the constructor in
+              # epan/iana-info.c) fixes the PLT 32-bit truncation bug on
+              # glibc < 2.17; G_SLICE=always-malloc is no longer needed.
+              if build/run/tshark --version; then
+                echo "PASS: tshark --version"
+              else
+                echo "FAIL: tshark --version; collecting gdb backtrace for diagnostics"
+                gdb --batch \
+                  -ex 'set pagination off' \
+                  -ex 'handle SIGSEGV stop print pass' \
+                  -ex run \
+                  -ex 'info locals' \
+                  -ex 'info args' \
+                  -ex 'printf "enterprise_val_ext._vs_match2 = %p\n", enterprise_val_ext._vs_match2' \
+                  -ex 'printf "enterprise_val_ext._vs_p       = %p\n", enterprise_val_ext._vs_p' \
+                  -ex 'printf "enterprise_val_ext._vs_num_entries = %u\n", enterprise_val_ext._vs_num_entries' \
+                  -ex 'printf "_try_val_to_str_ext_init        = %p\n", _try_val_to_str_ext_init' \
+                  -ex 'bt 30' \
+                  -ex quit \
+                  --args build/run/tshark --version 2>&1 || true
+                exit 1
+              fi
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 \
+                build/run/tshark -r test/captures/arp.pcap -c 1 -q 2>/dev/null \
+                && echo "PASS: tshark reads arp.pcap"
+              WIRESHARK_RUN_FROM_BUILD_DIRECTORY=1 \
+                build/run/tshark -G protocols 2>/dev/null | grep -qi "^tcp" \
+                && echo "PASS: protocol database loads"
+              # -----------------------------------------------------------
+
+              cmake3 --build build --target dist
+              cmake3 --build build --target wireshark_rpm
+              # Bundle custom runtime libraries into the workspace.
+              mkdir -p /workspace/el6-custom-libs
+              cp -a /usr/local/lib/libglib-2.0.so*    /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgobject-2.0.so* /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgmodule-2.0.so* /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgthread-2.0.so* /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libpcre2-8.so*     /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libxml2.so*        /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgpg-error.so*   /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libgcrypt.so*      /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /usr/local/lib/libcares.so*       /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /opt/rh/devtoolset-7/root/usr/lib64/libstdc++.so* /workspace/el6-custom-libs/ 2>/dev/null || true
+              cp -a /opt/rh/devtoolset-7/root/usr/lib64/libgcc_s.so*  /workspace/el6-custom-libs/ 2>/dev/null || true
+              # Restore ownership so the host runner (non-root) can mv/rm the
+              # root-owned files that Docker created in the mounted workspace.
+              chown -R "$(stat -c '%u:%g' /workspace)" /workspace/build /workspace/el6-custom-libs
+          EL6_BUILD
+
+      - name: Collect EL6 RPMs
+        run: |
+          mkdir -p rpm-el6
+          find build/packaging/rpm/RPMS -name '*.rpm' -exec mv {} rpm-el6/ \;
+
+      # ─── Offline deployment bundle (EL6) ─────────────────────────────────────
+      - name: Bundle EL6 offline installer
+        run: |
+          if [ -d el6-custom-libs ]; then
+            tar czf rpm-el6/custom-libs.tar.gz -C el6-custom-libs/ .
+            rm -rf el6-custom-libs/
+          fi
+
+          mkdir -p rpm-el6/test
+          cp pytest.ini rpm-el6/
+          cp test/conftest.py test/matchers.py test/subprocesstest.py rpm-el6/test/
+          cp test/suite_clopts.py rpm-el6/test/
+          cp -r test/suite_dfilter test/suite_dissectors \
+                test/captures test/config test/keys rpm-el6/test/
+
+          # No pytest wheels bundled for EL6: CentOS 6 ships Python 3.4 which is
+          # below pytest's Python >= 3.5 requirement.  test-install.sh detects
+          # this and skips test 5 automatically; the test/ directory is still
+          # included in the bundle in case a newer Python is installed by the user.
+
+          # ── install.sh ──────────────────────────────────────────────────────
+          cat > rpm-el6/install.sh << 'INSTALL_EL6'
+          #!/usr/bin/env bash
+          # Wireshark EL6 offline installer.  Must run as root.
+          # Only rpm is required; no yum, dnf, or internet access needed.
+          set -euo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          echo "=== Installing Wireshark (EL 6) ==="
+          if [ -f "$SCRIPT_DIR/custom-libs.tar.gz" ]; then
+            echo "--- Deploying bundled runtime libraries ---"
+            mkdir -p /usr/local/lib
+            tar xzf "$SCRIPT_DIR/custom-libs.tar.gz" -C /usr/local/lib/
+            echo /usr/local/lib > /etc/ld.so.conf.d/wireshark-deps.conf
+            ldconfig
+          fi
+          echo "--- Installing Wireshark RPMs ---"
+          rpm -Uvh "$SCRIPT_DIR"/wireshark*.rpm
+          echo ""
+          echo "=== Done.  Verify with: tshark --version ==="
+          INSTALL_EL6
+          chmod +x rpm-el6/install.sh
+
+          # ── test-install.sh ─────────────────────────────────────────────────
+          cat > rpm-el6/test-install.sh << 'TEST_SCRIPT'
+          #!/usr/bin/env bash
+          # Wireshark post-install functional tests.
+          # python3 >= 3.7 is required for the pytest suite (subprocess.run(capture_output=)
+          # was added in 3.7); no compiler or internet needed.
+          set -uo pipefail
+          SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+          TSHARK=${TSHARK:-$(command -v tshark 2>/dev/null || echo /usr/bin/tshark)}
+          pass=0; fail=0
+          ok()  { echo "  PASS: $*"; pass=$((pass+1)); }
+          err() { echo "  FAIL: $*"; fail=$((fail+1)); }
+
+          echo "=== Wireshark post-install tests ==="
+          echo "tshark: $TSHARK"
+
+          echo ""
+          echo "--- 1. tshark --version ---"
+          "$TSHARK" --version 2>&1 | head -1
+          "$TSHARK" --version 2>&1 | grep -qi "TShark" \
+            && ok "tshark --version" || err "tshark --version"
+
+          echo ""
+          echo "--- 2. Protocol database ---"
+          count=$("$TSHARK" -G protocols 2>/dev/null | grep -c "^[a-z]" || true)
+          [ "$count" -gt 100 ] \
+            && ok "$count protocols loaded" || err "protocol DB ($count protocols)"
+
+          echo ""
+          echo "--- 3. ARP packet dissection ---"
+          TMP=$(mktemp -d)
+          cleanup() { rm -rf "$TMP"; }
+          trap cleanup EXIT
+          # Minimal pcap: global header (24 B) + record header (16 B) + ARP request (42 B).
+          printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' > "$TMP/t.pcap"
+          printf '\x00\x00\x00\x00\x00\x00\x00\x00\x2a\x00\x00\x00\x2a\x00\x00\x00' >> "$TMP/t.pcap"
+          printf '\xff\xff\xff\xff\xff\xff\xde\xad\xbe\xef\x00\x01\x08\x06\x00\x01\x08\x00\x06\x04\x00\x01\xde\xad\xbe\xef\x00\x01\xc0\xa8\x01\x01\x00\x00\x00\x00\x00\x00\xc0\xa8\x01\xfe' >> "$TMP/t.pcap"
+          mac=$("$TSHARK" -r "$TMP/t.pcap" -T fields -e arp.src.hw_mac 2>/dev/null | head -1)
+          [ "$mac" = "de:ad:be:ef:00:01" ] \
+            && ok "ARP dissector (MAC: $mac)" || err "ARP dissector (got: $mac)"
+
+          echo ""
+          echo "--- 4. Display filter ---"
+          "$TSHARK" -r "$TMP/t.pcap" -Y "arp.opcode == 1" -c 1 -q 2>/dev/null \
+            && ok "display filter (arp.opcode == 1)" || err "display filter"
+
+          # pytest suite — runs against installed binaries via WS_BIN_PATH.
+          # Requires python3 >= 3.7 (subprocess.run(capture_output=) in subprocesstest.py),
+          # a bundled wheels/ directory, and bundled test/.
+          # Note: no wheels/ are bundled for EL6 (stock CentOS 6 ships Python 3.4 which
+          # predates the >= 3.7 requirement); test 5 will be skipped unless the user
+          # provides a compatible Python 3.7+ interpreter and a wheels/ directory.
+          PYMINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
+          PYMAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
+          if [ "$PYMAJOR" -ge 3 ] && [ "$PYMINOR" -ge 7 ] \
+              && [ -d "$SCRIPT_DIR/wheels" ] \
+              && [ -d "$SCRIPT_DIR/test" ] \
+              && python3 -m pip --version >/dev/null 2>&1; then
+            echo ""
+            echo "--- 5. pytest suite (Python $PYMAJOR.$PYMINOR) ---"
+            pytest_ok=0
+            python3 -m pip install --quiet --no-index \
+              --find-links "$SCRIPT_DIR/wheels" pytest \
+              && pytest_ok=1 \
+              || err "pytest suite (pip install failed)"
+            if [ "$pytest_ok" -eq 1 ]; then
+              WS_BIN_PATH=/usr/bin python3 -m pytest \
+                --rootdir "$SCRIPT_DIR" \
+                --override-ini="addopts=-ra" \
+                --disable-capture \
+                --disable-gui \
+                --skip-missing-programs all \
+                -v --tb=short \
+                "$SCRIPT_DIR/test/suite_dfilter" \
+                "$SCRIPT_DIR/test/suite_dissectors" \
+                "$SCRIPT_DIR/test/suite_clopts.py" \
+                && ok "pytest suite" || err "pytest suite"
+            fi
+          else
+            echo "  (skipping pytest: requires python3 >= 3.7 + pip + bundled wheels/ + test/)"
+          fi
+
+          echo ""
+          echo "=== Results: $pass passed, $fail failed ==="
+          [ "$fail" -eq 0 ] && exit 0 || exit 1
+          TEST_SCRIPT
+          chmod +x rpm-el6/test-install.sh
+
+      # Verify that the produced EL6 RPMs are valid and contain the expected
+      # binaries.  rpm -qip/rpm -qlp are pure file operations (no repos needed).
+      - name: Verify EL6 RPMs
+        run: |
+          echo "=== RPMs produced ==="
+          ls -lh rpm-el6/
+          rpm_count=$(ls rpm-el6/*.rpm 2>/dev/null | wc -l)
+          [ "$rpm_count" -gt 0 ] || { echo "FAIL: no RPMs produced"; exit 1; }
+          echo "PASS: $rpm_count RPM(s) found"
+          docker run --rm \
+            -v "$PWD/rpm-el6:/rpms:z" \
+            centos:6 bash -exc '
+              for rpm in /rpms/*.rpm; do
+                echo "--- $rpm ---"
+                rpm -qip "$rpm"
+              done
+              base_rpm=$(ls /rpms/wireshark-[0-9]*.rpm 2>/dev/null | head -1)
+              rpm -qlp "$base_rpm" | grep -q "bin/tshark" \
+                && echo "PASS: tshark binary in base RPM" \
+                || { echo "FAIL: tshark not in base RPM"; exit 1; }
+            '
+
+      - name: Upload EL6 RPMs
+        uses: actions/upload-artifact@v6
+        with:
+          name: wireshark-el6-rpms
+          path: rpm-el6
+          overwrite: true
